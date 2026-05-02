@@ -1,0 +1,10 @@
+torch==2.1.2+cu121
+torchvision==0.16.2+cu121
+torchaudio==2.1.2+cu121
+facenet-pytorch==2.5.3
+retina-face==0.0.17
+pandas==2.1.4
+opencv-python==4.8.1.78
+tqdm==4.66.1
+matplotlib==3.8.2
+pillow==10.1.0
