@@ -8,8 +8,6 @@ class RAFDBDataset(Dataset):
     def __init__(self, csv_file, root_dir, phase='train'):
         self.root_dir = root_dir
         self.phase = phase
-        
-        # Load CSV: [image_name, label]
         self.annotations = pd.read_csv(csv_file)
         
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
@@ -35,15 +33,13 @@ class RAFDBDataset(Dataset):
 
     def __getitem__(self, idx):
         img_name = str(self.annotations.iloc[idx, 0])
-        label = int(self.annotations.iloc[idx, 1]) # This is 1, 2, 3, etc.
+        label = int(self.annotations.iloc[idx, 1])
         
-        # FIX: Look inside the subfolder named after the label
-        # Example: .../DATASET/train/5/train_05103_aligned.jpg
+        # Look inside: root_dir/label_folder/image_name
         img_path = os.path.join(self.root_dir, str(label), img_name)
         
         if not os.path.exists(img_path):
-            # Fallback check: sometimes CSVs use 0-indexing or the label is different
-            raise FileNotFoundError(f"Image not found at {img_path}. Check if folder '{label}' exists.")
+            raise FileNotFoundError(f"Image not found: {img_path}")
 
         image = Image.open(img_path).convert('RGB')
         image = self.transform(image)
