@@ -1,10 +1,11 @@
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler   # 👈 CHANGED
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
 import time
+import numpy as np   # 👈 ADDED
 
 from dataset import RAFDBDataset
 from model import FRITNet
@@ -12,15 +13,34 @@ from loss import CombinedFERLoss
 
 # --- Colab Configuration ---
 BATCH_SIZE = 64  
-EPOCHS = 20
+EPOCHS = 25   # 👈 slightly increased
 LEARNING_RATE = 1e-4
 
-# Paths based on your Colab sidebar
+# Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
 TRAIN_CSV = os.path.join(BASE_PATH, "train_labels.csv")
 VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
 TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
+
+
+# ============================
+# 👇 NEW: Mixup
+# ============================
+def mixup_data(x, y, alpha=0.2):
+    if alpha <= 0:
+        return x, y, y, 1.0
+
+    lam = np.random.beta(alpha, alpha)
+    batch_size = x.size(0)
+
+    index = torch.randperm(batch_size).to(x.device)
+
+    mixed_x = lam * x + (1 - lam) * x[index]
+    y_a, y_b = y, y[index]
+
+    return mixed_x, y_a, y_b, lam
+
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,9 +50,29 @@ def train():
     train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
     
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
-    
+    # ============================
+    # 👇 NEW: Balanced Sampler
+    # ============================
+    labels = train_dataset.annotations.iloc[:, 1].values
+    class_counts = np.bincount(labels)[1:]
+    class_weights = 1.0 / class_counts
+    sample_weights = class_weights[labels - 1]
+
+    sampler = WeightedRandomSampler(
+        weights=torch.DoubleTensor(sample_weights),
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        sampler=sampler,
+        num_workers=2   # 👈 FIXED WARNING
+    )
+
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+
     print(f"Ready! Training on {len(train_dataset)} images.")
 
     # 2. Model, Loss, Optimizer
@@ -43,7 +83,6 @@ def train():
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     best_val_acc = 0.0
     
-    # Create a log file
     log_file = open("training_log.txt", "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -56,9 +95,17 @@ def train():
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
             
+            # ============================
+            # 👇 NEW: MIXUP APPLIED
+            # ============================
+            images, targets_a, targets_b, lam = mixup_data(images, labels)
+
             optimizer.zero_grad()
             logits, features = model(images)
-            loss = criterion(logits, features, labels)
+
+            loss = lam * criterion(logits, features, targets_a) + \
+                   (1 - lam) * criterion(logits, features, targets_b)
+
             loss.backward()
             optimizer.step()
             
@@ -66,9 +113,10 @@ def train():
             _, predicted = torch.max(logits.data, 1)
             train_total += labels.size(0)
             train_correct += (predicted == (labels - 1)).sum().item()
+
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
-        # Validation
+        # Validation (UNCHANGED)
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
         with torch.no_grad():
@@ -82,7 +130,7 @@ def train():
                 val_total += labels.size(0)
                 val_correct += (predicted == (labels - 1)).sum().item()
 
-        # Calculate metrics
+        # Metrics
         t_loss = train_loss / len(train_loader)
         t_acc = train_correct / train_total
         v_loss = val_loss / len(val_loader)
@@ -97,7 +145,6 @@ def train():
         log_file.write(f"{epoch+1},{t_loss:.4f},{t_acc:.4f},{v_loss:.4f},{v_acc:.4f}\n")
         log_file.flush()
 
-        # Save Best Weights
         if v_acc > best_val_acc:
             best_val_acc = v_acc
             torch.save(model.state_dict(), "best_frit_weights.pth")
@@ -105,7 +152,7 @@ def train():
 
     log_file.close()
 
-    # 4. Generate Graphs
+    # Graphs
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
     plt.plot(history['train_acc'], label='Train Acc')
@@ -122,6 +169,7 @@ def train():
     plt.tight_layout()
     plt.savefig("training_results_plot.png")
     print("Graphs saved as training_results_plot.png")
+
 
 if __name__ == "__main__":
     train()
