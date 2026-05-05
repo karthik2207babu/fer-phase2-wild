@@ -1,11 +1,10 @@
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader, WeightedRandomSampler   # 👈 CHANGED
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
 import time
-import numpy as np   # 👈 ADDED
 
 from dataset import RAFDBDataset
 from model import FRITNet
@@ -13,7 +12,7 @@ from loss import CombinedFERLoss
 
 # --- Colab Configuration ---
 BATCH_SIZE = 64  
-EPOCHS = 25   # 👈 slightly increased
+EPOCHS = 25  
 LEARNING_RATE = 1e-4
 
 # Paths
@@ -24,24 +23,6 @@ TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
 
-# ============================
-# 👇 NEW: Mixup
-# ============================
-def mixup_data(x, y, alpha=0.2):
-    if alpha <= 0:
-        return x, y, y, 1.0
-
-    lam = np.random.beta(alpha, alpha)
-    batch_size = x.size(0)
-
-    index = torch.randperm(batch_size).to(x.device)
-
-    mixed_x = lam * x + (1 - lam) * x[index]
-    y_a, y_b = y, y[index]
-
-    return mixed_x, y_a, y_b, lam
-
-
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Starting training on: {device}")
@@ -50,11 +31,9 @@ def train():
     train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
     
-    # ============================
-    # 👇 NEW: Balanced Sampler
-    # ============================
+    # Balanced Sampler (UNCHANGED)
     labels = train_dataset.annotations.iloc[:, 1].values
-    class_counts = np.bincount(labels)[1:]
+    class_counts = torch.bincount(torch.tensor(labels))[1:].numpy()
     class_weights = 1.0 / class_counts
     sample_weights = class_weights[labels - 1]
 
@@ -68,7 +47,7 @@ def train():
         train_dataset,
         batch_size=BATCH_SIZE,
         sampler=sampler,
-        num_workers=2   # 👈 FIXED WARNING
+        num_workers=2
     )
 
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
@@ -95,16 +74,11 @@ def train():
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
             
-            # ============================
-            # 👇 NEW: MIXUP APPLIED
-            # ============================
-            images, targets_a, targets_b, lam = mixup_data(images, labels)
-
             optimizer.zero_grad()
             logits, features = model(images)
 
-            loss = lam * criterion(logits, features, targets_a) + \
-                   (1 - lam) * criterion(logits, features, targets_b)
+            # ✅ ORIGINAL LOSS (NO MIXUP)
+            loss = criterion(logits, features, labels)
 
             loss.backward()
             optimizer.step()
