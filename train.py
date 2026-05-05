@@ -12,7 +12,7 @@ from loss import CombinedFERLoss
 
 # --- Colab Configuration ---
 BATCH_SIZE = 64  
-EPOCHS = 25   # 👈 increased
+EPOCHS = 30   # 👈 CHANGED (25 → 30)
 LEARNING_RATE = 1e-4
 
 # Paths
@@ -30,8 +30,8 @@ def train():
     train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
     
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)  # 👈 CHANGED
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)     # 👈 CHANGED
     
     print(f"Ready! Training on {len(train_dataset)} images.")
 
@@ -42,10 +42,9 @@ def train():
     optimizer = optim.AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
-        weight_decay=5e-5   # 👈 reduced
+        weight_decay=5e-5
     )
 
-    # 👇 NEW: scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=EPOCHS
@@ -112,7 +111,6 @@ def train():
             torch.save(model.state_dict(), "best_frit_weights.pth")
             print(f"--> Saved new best weights: {v_acc:.4f}")
 
-        # 👇 NEW: scheduler step
         scheduler.step()
 
     log_file.close()
