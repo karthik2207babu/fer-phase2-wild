@@ -12,10 +12,10 @@ from loss import CombinedFERLoss
 
 # --- Colab Configuration ---
 BATCH_SIZE = 64  
-EPOCHS = 20
+EPOCHS = 25   # 👈 increased
 LEARNING_RATE = 1e-4
 
-# Paths based on your Colab sidebar
+# Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
 TRAIN_CSV = os.path.join(BASE_PATH, "train_labels.csv")
 VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
@@ -38,12 +38,22 @@ def train():
     # 2. Model, Loss, Optimizer
     model = FRITNet(num_classes=7).to(device)
     criterion = CombinedFERLoss(feat_dim=128).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=5e-5   # 👈 reduced
+    )
+
+    # 👇 NEW: scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=EPOCHS
+    )
 
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     best_val_acc = 0.0
     
-    # Create a log file
     log_file = open("training_log.txt", "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -82,7 +92,7 @@ def train():
                 val_total += labels.size(0)
                 val_correct += (predicted == (labels - 1)).sum().item()
 
-        # Calculate metrics
+        # Metrics
         t_loss = train_loss / len(train_loader)
         t_acc = train_correct / train_total
         v_loss = val_loss / len(val_loader)
@@ -97,15 +107,17 @@ def train():
         log_file.write(f"{epoch+1},{t_loss:.4f},{t_acc:.4f},{v_loss:.4f},{v_acc:.4f}\n")
         log_file.flush()
 
-        # Save Best Weights
         if v_acc > best_val_acc:
             best_val_acc = v_acc
             torch.save(model.state_dict(), "best_frit_weights.pth")
             print(f"--> Saved new best weights: {v_acc:.4f}")
 
+        # 👇 NEW: scheduler step
+        scheduler.step()
+
     log_file.close()
 
-    # 4. Generate Graphs
+    # Graphs
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
     plt.plot(history['train_acc'], label='Train Acc')
