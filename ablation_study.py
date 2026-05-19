@@ -13,13 +13,11 @@ from ptflops import get_model_complexity_info
 from dataset import RAFDBDataset
 from loss import CombinedFERLoss
 
-from model import (
-    TruncatedFaceNet,
-    LFAModule,
-    MultiScaleModule,
-    SAFM,
-    FRITTransformer
-)
+from backbone import TruncatedFaceNet
+from lfa import LFAModule
+from multiscale import MultiScaleGlobalConv
+from safm import SAFM
+from transformer import FRITTransformer
 
 # =========================================================
 # CONFIG
@@ -37,10 +35,6 @@ VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
 TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
-# =========================================================
-# SAVE DIRECTORY
-# =========================================================
-
 SAVE_DIR = "/content/drive/MyDrive/FER_Ablation_Results"
 
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -56,7 +50,7 @@ device = torch.device(
 print(f"Running on: {device}")
 
 # =========================================================
-# DATASETS
+# DATA
 # =========================================================
 
 train_dataset = RAFDBDataset(
@@ -86,7 +80,7 @@ val_loader = DataLoader(
 )
 
 print(f"Train Images: {len(train_dataset)}")
-print(f"Val Images: {len(val_dataset)}")
+print(f"Validation Images: {len(val_dataset)}")
 
 # =========================================================
 # MODEL VARIANTS
@@ -147,7 +141,7 @@ class LFANet(nn.Module):
         return logits, features
 
 
-class LFAMGTCNet(nn.Module):
+class LFAMultiScaleNet(nn.Module):
 
     def __init__(self):
         super().__init__()
@@ -156,7 +150,7 @@ class LFAMGTCNet(nn.Module):
 
         self.lfa = LFAModule()
 
-        self.mgtc = MultiScaleModule()
+        self.multiscale = MultiScaleGlobalConv()
 
         self.transformer = FRITTransformer()
 
@@ -166,7 +160,7 @@ class LFAMGTCNet(nn.Module):
 
         x = self.lfa(x)
 
-        x = self.mgtc(x)
+        x = self.multiscale(x)
 
         logits, features = self.transformer(x)
 
@@ -182,7 +176,7 @@ class FullFRITNet(nn.Module):
 
         self.lfa = LFAModule()
 
-        self.mgtc = MultiScaleModule()
+        self.multiscale = MultiScaleGlobalConv()
 
         self.safm = SAFM()
 
@@ -194,7 +188,7 @@ class FullFRITNet(nn.Module):
 
         x = self.lfa(x)
 
-        x = self.mgtc(x)
+        x = self.multiscale(x)
 
         x = self.safm(x)
 
@@ -209,15 +203,15 @@ class FullFRITNet(nn.Module):
 variants = {
     "Baseline": BaselineNet,
     "LFA": LFANet,
-    "LFA_MGTC": LFAMGTCNet,
+    "LFA_MultiScale": LFAMultiScaleNet,
     "Full_FRIT": FullFRITNet
 }
 
 # =========================================================
-# RESULTS STORAGE
+# RESULTS
 # =========================================================
 
-final_results = []
+results = []
 
 # =========================================================
 # TRAIN FUNCTION
@@ -232,27 +226,12 @@ def train_variant(name, model_class):
 
     model = model_class().to(device)
 
-    # =====================================================
-    # FREEZE BACKBONE
-    # =====================================================
-
-    for param in model.backbone.parameters():
-        param.requires_grad = False
-
-    # =====================================================
-    # LOSS
-    # =====================================================
-
     criterion = CombinedFERLoss(
         feat_dim=128
     ).to(device)
 
-    # =====================================================
-    # OPTIMIZER
-    # =====================================================
-
     optimizer = optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
+        model.parameters(),
         lr=LEARNING_RATE,
         weight_decay=5e-5
     )
@@ -263,7 +242,7 @@ def train_variant(name, model_class):
     )
 
     # =====================================================
-    # GFLOPS + PARAMS
+    # GFLOPS
     # =====================================================
 
     macs, params = get_model_complexity_info(
@@ -274,17 +253,13 @@ def train_variant(name, model_class):
         verbose=False
     )
 
-    print(f"GFLOPs/MACs : {macs}")
+    print(f"MACs/GFLOPs : {macs}")
     print(f"Parameters  : {params}")
 
-    # =====================================================
-    # HISTORY
-    # =====================================================
-
-    history_train = []
-    history_val = []
-
     best_acc = 0.0
+
+    train_history = []
+    val_history = []
 
     start_time = time.time()
 
@@ -294,15 +269,11 @@ def train_variant(name, model_class):
 
     for epoch in range(EPOCHS):
 
-        # =================================================
-        # TRAIN
-        # =================================================
-
         model.train()
 
+        train_loss = 0.0
         train_correct = 0
         train_total = 0
-        train_loss = 0.0
 
         pbar = tqdm(
             train_loader,
@@ -330,16 +301,16 @@ def train_variant(name, model_class):
 
             train_loss += loss.item()
 
-            preds = torch.argmax(logits, dim=1)
+            _, predicted = torch.max(logits.data, 1)
 
             train_total += labels.size(0)
 
             train_correct += (
-                preds == (labels - 1)
+                predicted == (labels - 1)
             ).sum().item()
 
             pbar.set_postfix({
-                "loss": f"{loss.item():.4f}"
+                'loss': f"{loss.item():.4f}"
             })
 
         # =================================================
@@ -360,30 +331,30 @@ def train_variant(name, model_class):
 
                 logits, features = model(images)
 
-                preds = torch.argmax(logits, dim=1)
+                _, predicted = torch.max(logits.data, 1)
 
                 val_total += labels.size(0)
 
                 val_correct += (
-                    preds == (labels - 1)
+                    predicted == (labels - 1)
                 ).sum().item()
 
         train_acc = train_correct / train_total
         val_acc = val_correct / val_total
 
-        history_train.append(train_acc)
-        history_val.append(val_acc)
+        train_history.append(train_acc)
+        val_history.append(val_acc)
 
         scheduler.step()
 
         print(
-            f"\nEpoch {epoch+1}: "
+            f"Epoch {epoch+1}: "
             f"T-Acc={train_acc:.4f}, "
             f"V-Acc={val_acc:.4f}"
         )
 
         # =================================================
-        # SAVE BEST MODEL
+        # SAVE BEST
         # =================================================
 
         if val_acc > best_acc:
@@ -403,10 +374,10 @@ def train_variant(name, model_class):
             print(f"Saved Best Weights: {weight_path}")
 
     # =====================================================
-    # TRAINING TIME
+    # TIME
     # =====================================================
 
-    total_time = time.time() - start_time
+    total_time = (time.time() - start_time) / 60
 
     # =====================================================
     # SAVE PLOT
@@ -414,8 +385,8 @@ def train_variant(name, model_class):
 
     plt.figure(figsize=(8, 5))
 
-    plt.plot(history_train, label='Train Acc')
-    plt.plot(history_val, label='Val Acc')
+    plt.plot(train_history, label='Train Acc')
+    plt.plot(val_history, label='Val Acc')
 
     plt.title(f"{name} Accuracy")
 
@@ -440,12 +411,12 @@ def train_variant(name, model_class):
     # STORE RESULTS
     # =====================================================
 
-    final_results.append({
+    results.append({
         "Variant": name,
-        "Best Accuracy": round(best_acc, 4),
-        "GFLOPs/MACs": macs,
-        "Parameters": params,
-        "Training Time (min)": round(total_time / 60, 2)
+        "Accuracy": round(best_acc, 4),
+        "MACs": macs,
+        "Params": params,
+        "TrainTime": round(total_time, 2)
     })
 
 # =========================================================
@@ -460,7 +431,7 @@ for variant_name, variant_class in variants.items():
     )
 
 # =========================================================
-# FINAL RESULTS TABLE
+# FINAL TABLE
 # =========================================================
 
 print("\n")
@@ -469,53 +440,49 @@ print("FINAL ABLATION RESULTS")
 print("==============================================================")
 
 print(
-    f"{'Variant':<15}"
+    f"{'Variant':<20}"
     f"{'Accuracy':<15}"
-    f"{'GFLOPs/MACs':<20}"
+    f"{'MACs/GFLOPs':<20}"
     f"{'Parameters':<20}"
-    f"{'Train Time(min)':<20}"
+    f"{'TrainTime(min)':<20}"
 )
 
-for result in final_results:
+for r in results:
 
     print(
-        f"{result['Variant']:<15}"
-        f"{result['Best Accuracy']:<15}"
-        f"{result['GFLOPs/MACs']:<20}"
-        f"{result['Parameters']:<20}"
-        f"{result['Training Time (min)']:<20}"
+        f"{r['Variant']:<20}"
+        f"{r['Accuracy']:<15}"
+        f"{r['MACs']:<20}"
+        f"{r['Params']:<20}"
+        f"{r['TrainTime']:<20}"
     )
 
 # =========================================================
 # SAVE RESULTS FILE
 # =========================================================
 
-results_file = os.path.join(
+results_path = os.path.join(
     SAVE_DIR,
     "ablation_results.txt"
 )
 
-with open(results_file, "w") as f:
+with open(results_path, "w") as f:
 
     f.write("FINAL ABLATION RESULTS\n")
     f.write("====================================================\n\n")
 
-    for result in final_results:
+    for r in results:
 
-        line = (
-            f"Variant: {result['Variant']}\n"
-            f"Accuracy: {result['Best Accuracy']}\n"
-            f"GFLOPs/MACs: {result['GFLOPs/MACs']}\n"
-            f"Parameters: {result['Parameters']}\n"
-            f"Training Time(min): {result['Training Time (min)']}\n"
-            f"--------------------------------------------------\n"
-        )
-
-        f.write(line)
+        f.write(f"Variant: {r['Variant']}\n")
+        f.write(f"Accuracy: {r['Accuracy']}\n")
+        f.write(f"MACs/GFLOPs: {r['MACs']}\n")
+        f.write(f"Parameters: {r['Params']}\n")
+        f.write(f"Training Time(min): {r['TrainTime']}\n")
+        f.write("--------------------------------------------------\n")
 
 print("\n==============================================================")
 print("ABLATION STUDY COMPLETE")
 print("==============================================================")
 
-print(f"\nSaved Results File: {results_file}")
+print(f"\nSaved Results To: {results_path}")
 print(f"Saved Everything To: {SAVE_DIR}")
