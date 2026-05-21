@@ -248,10 +248,24 @@ checkpoint = torch.load(
     map_location=DEVICE
 )
 
-model.load_state_dict(
-    checkpoint,
-    strict=False
-)
+# =========================================================
+# LOAD ONLY MATCHING WEIGHTS
+# =========================================================
+
+model_dict = model.state_dict()
+
+filtered_checkpoint = {
+    k: v
+    for k, v in checkpoint.items()
+    if k in model_dict
+    and model_dict[k].shape == v.shape
+}
+
+model_dict.update(filtered_checkpoint)
+
+model.load_state_dict(model_dict)
+
+print("Partial RAF weights loaded successfully")
 
 print("Weights loaded successfully")
 
