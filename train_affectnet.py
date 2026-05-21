@@ -58,7 +58,7 @@ TEST_DIR = os.path.join(BASE_PATH, "Test")
 # RAF-DB PRETRAINED WEIGHTS
 # =========================================================
 
-RAF_WEIGHTS = "/content/drive/MyDrive/best_frit_weights.pth"
+RAF_WEIGHTS = "/content/drive/MyDrive/FER_Phase2_Results/best_frit_weights.pth"
 
 # =========================================================
 # SAVE DIRECTORY
