@@ -18,12 +18,26 @@ from model import FRITNet
 # CONFIG
 # =========================================================
 
-BATCH_SIZE = 64      # Matched to your successful run
-EPOCHS = 30          # Increased to 30
+BATCH_SIZE = 64
+EPOCHS = 30
 LEARNING_RATE = 1e-4
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Running on: {DEVICE}")
+
+# =========================================================
+# ZIP EXTRACTION
+# =========================================================
+
+ZIP_PATH = "/content/drive/MyDrive/affectnet.zip"
+EXTRACT_PATH = "/content/data"
+
+os.makedirs(EXTRACT_PATH, exist_ok=True)
+
+print("\nExtracting AffectNet ZIP...")
+# -q: quiet, -n: never overwrite existing files
+os.system(f'unzip -q -n "{ZIP_PATH}" -d "{EXTRACT_PATH}"')
+print("Extraction Complete")
 
 # =========================================================
 # DATASET PATHS & SAVING
@@ -33,6 +47,7 @@ BASE_PATH = "/content/data/affectnet/affectnet"
 TRAIN_DIR = os.path.join(BASE_PATH, "Train")
 TEST_DIR = os.path.join(BASE_PATH, "Test")
 
+# Save directly to Drive
 SAVE_DIR = "/content/drive/MyDrive/AffectNet_FRIT_Results"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -43,7 +58,7 @@ emotion_map = {
 NUM_CLASSES = 8
 
 # =========================================================
-# RANDOM MASKING (Ported from dataset.py)
+# RANDOM MASKING
 # =========================================================
 
 class RandomMasking:
@@ -53,14 +68,12 @@ class RandomMasking:
         self.max_area = max_area
 
     def __call__(self, img):
-        # img shape: (C, H, W)
         if torch.rand(1).item() > self.p:
             return img
 
         C, H, W = img.shape
         area = H * W
 
-        # Random mask size
         mask_area = torch.empty(1).uniform_(self.min_area, self.max_area).item() * area
         aspect_ratio = torch.empty(1).uniform_(0.3, 3.3).item()
 
@@ -70,7 +83,6 @@ class RandomMasking:
         if h >= H or w >= W:
             return img
 
-        # Restrict mask to upper face region
         top = torch.randint(0, H // 2, (1,)).item()
         left = torch.randint(0, W - w, (1,)).item()
 
@@ -87,7 +99,7 @@ train_transform = transforms.Compose([
     transforms.RandomRotation(10),
     transforms.ColorJitter(brightness=0.2, contrast=0.2),
     transforms.ToTensor(),
-    RandomMasking(p=0.5), # Applied AFTER ToTensor()
+    RandomMasking(p=0.5), 
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
@@ -138,7 +150,6 @@ class AffectNetDataset(Dataset):
 # =========================================================
 
 def train():
-    # 1. Load Data
     train_dataset = AffectNetDataset(TRAIN_DIR, transform=train_transform)
     test_dataset = AffectNetDataset(TEST_DIR, transform=val_transform)
 
@@ -148,7 +159,6 @@ def train():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
-    # 2. Dynamic Class Weights for AffectNet
     class_counts = [0] * NUM_CLASSES
     for _, label in train_dataset.samples:
         class_counts[label] += 1
@@ -156,35 +166,28 @@ def train():
     total_samples = sum(class_counts)
     class_weights = [total_samples / (NUM_CLASSES * count) for count in class_counts]
     class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
-    print(f"\nDynamic Class Weights: {class_weights}")
 
-    # 3. Model, Loss, Optimizer
-    print("\nInitializing FRITNet with VGGFace2 pre-trained backbone...")
     model = FRITNet(num_classes=NUM_CLASSES).to(DEVICE)
-
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
-
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=LEARNING_RATE,
-        weight_decay=5e-5
-    )
-
+    
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    # 4. History Tracking
-    best_acc = 0.0
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     
-    log_file_path = os.path.join(SAVE_DIR, "affectnet_frit_log.txt")
-    log_file = open(log_file_path, "w")
-    log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
+    # Create the master log file
+    log_file_path = os.path.join(SAVE_DIR, "affectnet_frit_master_log.txt")
+    with open(log_file_path, "w") as log_file:
+        log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
     
     start_time = time.time()
 
-    # 5. Training Loop
+    # =========================================================
+    # EPOCH LOOP
+    # =========================================================
     for epoch in range(EPOCHS):
-        print(f"\n================ EPOCH {epoch+1}/{EPOCHS} ================")
+        current_epoch = epoch + 1
+        print(f"\n================ EPOCH {current_epoch}/{EPOCHS} ================")
         
         # --- TRAIN ---
         model.train()
@@ -195,8 +198,6 @@ def train():
             images, labels = images.to(DEVICE), labels.to(DEVICE)
 
             optimizer.zero_grad()
-            
-            # Unpack both logits and features from FRITNet
             logits, features = model(images)
             
             loss = criterion(logits, labels)
@@ -236,61 +237,68 @@ def train():
 
         scheduler.step()
 
-        # --- METRICS & SAVING ---
+        # --- RECORD METRICS ---
         history['train_loss'].append(t_loss)
         history['train_acc'].append(t_acc)
         history['val_loss'].append(v_loss)
         history['val_acc'].append(v_acc)
 
-        log_text = f"Epoch {epoch+1} | T-Loss: {t_loss:.4f} | T-Acc: {t_acc:.4f} | V-Loss: {v_loss:.4f} | V-Acc: {v_acc:.4f}"
+        log_text = f"Epoch {current_epoch} | T-Loss: {t_loss:.4f} | T-Acc: {t_acc:.4f} | V-Loss: {v_loss:.4f} | V-Acc: {v_acc:.4f}"
         print(log_text)
         
-        log_file.write(f"{epoch+1},{t_loss:.4f},{t_acc:.4f},{v_loss:.4f},{v_acc:.4f}\n")
-        log_file.flush()
+        # Append to log file and flush immediately
+        with open(log_file_path, "a") as log_file:
+            log_file.write(f"{current_epoch},{t_loss:.4f},{t_acc:.4f},{v_loss:.4f},{v_acc:.4f}\n")
 
-        if v_acc > best_acc:
-            best_acc = v_acc
-            weight_path = os.path.join(SAVE_DIR, "best_affectnet_frit_weights.pth")
-            torch.save(model.state_dict(), weight_path)
-            print(f"--> Saved New Best Model (Acc: {v_acc:.4f}) to {weight_path}")
+        # =========================================================
+        # SAVE WEIGHTS FOR THIS SPECIFIC EPOCH
+        # =========================================================
+        weight_filename = f"affectnet_weights_epoch_{current_epoch}.pth"
+        weight_path = os.path.join(SAVE_DIR, weight_filename)
+        torch.save(model.state_dict(), weight_path)
+        print(f"--> Saved Weights: {weight_filename}")
 
-    log_file.close()
+        # =========================================================
+        # PLOT AND SAVE GRAPHS FOR THIS SPECIFIC EPOCH
+        # =========================================================
+        plt.figure(figsize=(12, 5))
+        
+        # Accuracy Subplot
+        plt.subplot(1, 2, 1)
+        plt.plot(history['train_acc'], label='Train Acc', marker='o')
+        plt.plot(history['val_acc'], label='Val Acc', marker='o')
+        plt.title(f'Accuracy (Up to Epoch {current_epoch})')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.legend()
+        plt.grid(True)
 
-    # =========================================================
-    # PLOTTING
-    # =========================================================
-    plt.figure(figsize=(12, 5))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(history['train_acc'], label='Train Acc')
-    plt.plot(history['val_acc'], label='Val Acc')
-    plt.title('AffectNet FRITNet Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
-    plt.legend()
-    plt.grid(True)
-
-    plt.subplot(1, 2, 2)
-    plt.plot(history['train_loss'], label='Train Loss')
-    plt.plot(history['val_loss'], label='Val Loss')
-    plt.title('AffectNet FRITNet Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True)
-    
-    plt.tight_layout()
-    plot_path = os.path.join(SAVE_DIR, "affectnet_frit_results_plot.png")
-    plt.savefig(plot_path)
-    print(f"\nGraphs saved as {plot_path}")
+        # Loss Subplot
+        plt.subplot(1, 2, 2)
+        plt.plot(history['train_loss'], label='Train Loss', marker='o')
+        plt.plot(history['val_loss'], label='Val Loss', marker='o')
+        plt.title(f'Loss (Up to Epoch {current_epoch})')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+        
+        plt.tight_layout()
+        
+        plot_filename = f"affectnet_plot_epoch_{current_epoch}.png"
+        plot_path = os.path.join(SAVE_DIR, plot_filename)
+        plt.savefig(plot_path)
+        
+        # Close the plot to free up memory
+        plt.close()
+        print(f"--> Saved Plot: {plot_filename}")
 
     total_time = (time.time() - start_time) / 60
     print("\n===================================================")
     print("TRAINING COMPLETE")
     print("===================================================")
-    print(f"Best Validation Accuracy : {best_acc:.4f}")
     print(f"Training Time (min)      : {total_time:.2f}")
+    print(f"All files saved to       : {SAVE_DIR}")
 
 if __name__ == "__main__":
-    # Assuming you run zip extraction prior to executing this script
     train()
