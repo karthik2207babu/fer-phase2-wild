@@ -2,17 +2,31 @@ import torch
 import torch.nn as nn
 
 class FRITTransformer(nn.Module):
-    def __init__(self, embed_dim=128, num_heads=4, num_layers=2, num_classes=7, dropout=0.5):
+    def __init__(
+        self,
+        embed_dim=128,
+        num_heads=4,
+        num_layers=2,
+        num_classes=7,
+        dropout=0.5
+    ):
         super(FRITTransformer, self).__init__()
-        
-        # Now we only have 5 tokens: 1 global + 4 regions
-        self.num_tokens = 5
-        
-        # Positional embedding for 5 tokens
-        self.pos_embed = nn.Parameter(torch.randn(1, self.num_tokens, embed_dim))
+
+        # -------------------------------------------------
+        # 16 regional tokens + 1 global token = 17 tokens
+        # -------------------------------------------------
+        self.num_tokens = 17
+
+        # Positional embeddings
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, self.num_tokens, embed_dim)
+        )
+
         self.pos_drop = nn.Dropout(p=dropout)
-        
+
+        # -------------------------------------------------
         # Transformer Encoder
+        # -------------------------------------------------
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
@@ -21,9 +35,15 @@ class FRITTransformer(nn.Module):
             activation='gelu',
             batch_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # Classification head (same as before)
+
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers
+        )
+
+        # -------------------------------------------------
+        # Classification Head
+        # -------------------------------------------------
         self.head = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Dropout(dropout),
@@ -31,67 +51,104 @@ class FRITTransformer(nn.Module):
         )
 
     def forward(self, x):
-        # Input: (B, 128, 28, 28)
+        """
+        Input:
+            x -> (B, 128, 28, 28)
+
+        Output:
+            logits   -> (B, num_classes)
+            features -> (B, 128)
+        """
+
         B, C, H, W = x.shape
 
-        # -----------------------------
-        # 1. Split into 4 regions
-        # -----------------------------
-        tl = x[:, :, :14, :14]   # top-left
-        tr = x[:, :, :14, 14:]   # top-right
-        bl = x[:, :, 14:, :14]   # bottom-left
-        br = x[:, :, 14:, 14:]   # bottom-right
+        # =================================================
+        # 1. Create 4×4 grid tokens
+        # Each patch = 7×7
+        # =================================================
 
-        # -----------------------------
-        # 2. Global Average Pooling
-        # -----------------------------
-        def gap(t):
-            return t.mean(dim=[2, 3])  # (B, 128)
+        patch_size = 7
+        tokens = []
 
-        x1 = gap(tl)
-        x2 = gap(tr)
-        x3 = gap(bl)
-        x4 = gap(br)
+        for i in range(4):
+            for j in range(4):
 
-        # -----------------------------
+                patch = x[
+                    :,
+                    :,
+                    i*patch_size:(i+1)*patch_size,
+                    j*patch_size:(j+1)*patch_size
+                ]
+
+                # Global Average Pool each patch
+                token = patch.mean(dim=[2, 3])  # (B,128)
+
+                tokens.append(token)
+
+        # =================================================
+        # 2. Stack regional tokens
+        # =================================================
+
+        regional_tokens = torch.stack(tokens, dim=1)
+        # Shape: (B,16,128)
+
+        # =================================================
         # 3. Global token
-        # -----------------------------
-        xg = x.mean(dim=[2, 3])  # (B, 128)
+        # =================================================
 
-        # -----------------------------
-        # 4. Stack tokens → (B, 5, 128)
-        # Order: [global, tl, tr, bl, br]
-        # -----------------------------
-        T = torch.stack([xg, x1, x2, x3, x4], dim=1)
+        global_token = x.mean(dim=[2, 3]).unsqueeze(1)
+        # Shape: (B,1,128)
 
-        # -----------------------------
-        # 5. Add positional embedding
-        # -----------------------------
+        # =================================================
+        # 4. Final token structure
+        # [global | 16 regional]
+        # =================================================
+
+        T = torch.cat([global_token, regional_tokens], dim=1)
+        # Shape: (B,17,128)
+
+        # =================================================
+        # 5. Add positional embeddings
+        # =================================================
+
         T = T + self.pos_embed
         T = self.pos_drop(T)
 
-        # -----------------------------
-        # 6. Transformer
-        # -----------------------------
-        T = self.transformer(T)  # (B, 5, 128)
+        # =================================================
+        # 6. Transformer Encoder
+        # =================================================
 
-        # -----------------------------
+        T = self.transformer(T)
+        # Shape: (B,17,128)
+
+        # =================================================
         # 7. Use GLOBAL token only
-        # -----------------------------
-        features = T[:, 0, :]  # (B, 128)
+        # (Keeping minimal architectural change)
+        # =================================================
 
-        # -----------------------------
+        features = T[:, 0, :]
+        # Shape: (B,128)
+
+        # =================================================
         # 8. Classification
-        # -----------------------------
+        # =================================================
+
         logits = self.head(features)
 
         return logits, features
 
 
 if __name__ == "__main__":
+
     dummy_input = torch.randn(2, 128, 28, 28)
+
     model = FRITTransformer()
+
     logits, features = model(dummy_input)
 
-    print("Logits shape:", logits.shape)     # (2, 7)
-    print("Features shape:", features.shape) # (2, 128)
+    print("Logits shape:", logits.shape)
+    print("Features shape:", features.shape)
+
+    # Expected:
+    # Logits   -> (2,7)
+    # Features -> (2,128)
