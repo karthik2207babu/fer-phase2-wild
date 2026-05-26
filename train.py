@@ -12,11 +12,7 @@ from loss import CombinedFERLoss
 # --- Configuration ---
 BATCH_SIZE = 64
 EPOCHS = 50
-
-# ----------------------------------------
-# Slightly stronger LR
-# ----------------------------------------
-LEARNING_RATE = 7e-5
+LEARNING_RATE = 1e-4
 
 # Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -31,9 +27,6 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Starting training on: {device}")
 
-    # ---------------------------------------------------
-    # Data
-    # ---------------------------------------------------
     train_dataset = RAFDBDataset(
         csv_file=TRAIN_CSV,
         root_dir=TRAIN_ROOT,
@@ -62,47 +55,25 @@ def train():
 
     print(f"Ready! Training on {len(train_dataset)} images.")
 
-    # ---------------------------------------------------
-    # Model
-    # ---------------------------------------------------
     model = FRITNet(num_classes=7).to(device)
 
     criterion = CombinedFERLoss(feat_dim=128).to(device)
 
-    # ---------------------------------------------------
-    # Differential Learning Rates
-    # ---------------------------------------------------
-    backbone_params = []
-    new_params = []
-
-    for name, param in model.named_parameters():
-
-        if not param.requires_grad:
-            continue
-
-        if "backbone" in name:
-            backbone_params.append(param)
-        else:
-            new_params.append(param)
-
+    # ---------------------------------------------
+    # Original simpler optimizer
+    # ---------------------------------------------
     optimizer = optim.AdamW(
-        [
-            {"params": backbone_params, "lr": 1e-5},
-            {"params": new_params, "lr": LEARNING_RATE}
-        ],
+        model.parameters(),
+        lr=LEARNING_RATE,
         weight_decay=5e-5
     )
 
-    # ---------------------------------------------------
-    # Scheduler
-    # Increased patience
-    # ---------------------------------------------------
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    # ---------------------------------------------
+    # Original cosine scheduler
+    # ---------------------------------------------
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        mode='max',
-        factor=0.5,
-        patience=5,
-        min_lr=1e-6
+        T_max=EPOCHS
     )
 
     history = {
@@ -117,9 +88,6 @@ def train():
     log_file = open("training_log.txt", "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
-    # ---------------------------------------------------
-    # Training Loop
-    # ---------------------------------------------------
     for epoch in range(EPOCHS):
 
         model.train()
@@ -143,11 +111,6 @@ def train():
 
             loss.backward()
 
-            # --------------------------------------------
-            # Gradient clipping
-            # --------------------------------------------
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
             optimizer.step()
 
             train_loss += loss.item()
@@ -160,9 +123,6 @@ def train():
 
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
-        # ---------------------------------------------------
-        # Validation
-        # ---------------------------------------------------
         model.eval()
 
         val_loss = 0.0
@@ -188,9 +148,6 @@ def train():
 
                 val_correct += (predicted == (labels - 1)).sum().item()
 
-        # ---------------------------------------------------
-        # Metrics
-        # ---------------------------------------------------
         t_loss = train_loss / len(train_loader)
         t_acc = train_correct / train_total
 
@@ -218,16 +175,10 @@ def train():
 
             print(f"--> Saved new best weights: {v_acc:.4f}")
 
-        # ---------------------------------------------------
-        # Scheduler step
-        # ---------------------------------------------------
-        scheduler.step(v_acc)
+        scheduler.step()
 
     log_file.close()
 
-    # ---------------------------------------------------
-    # Graphs
-    # ---------------------------------------------------
     plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
