@@ -3,19 +3,19 @@ import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
-import torch   # 👈 ADDED
+import torch
 
 # ============================
-# 👇 NEW: Controlled Masking
+# Controlled Random Masking
 # ============================
 class RandomMasking:
-    def __init__(self, p=0.5, min_area=0.04, max_area=0.3):
+    def __init__(self, p=0.33, min_area=0.04, max_area=0.3):
         self.p = p
         self.min_area = min_area
         self.max_area = max_area
 
     def __call__(self, img):
-        # img shape: (C, H, W)
+
         if torch.rand(1).item() > self.p:
             return img
 
@@ -32,8 +32,11 @@ class RandomMasking:
         if h >= H or w >= W:
             return img
 
-        # 👇 IMPORTANT: restrict mask to upper face region
-        top = torch.randint(0, H // 2, (1,)).item()
+        # ------------------------------------------------
+        # Fully random mask position
+        # (not only upper face anymore)
+        # ------------------------------------------------
+        top = torch.randint(0, H - h, (1,)).item()
         left = torch.randint(0, W - w, (1,)).item()
 
         img[:, top:top+h, left:left+w] = 0
@@ -47,16 +50,29 @@ class RAFDBDataset(Dataset):
         self.phase = phase
         self.annotations = pd.read_csv(csv_file)
         
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                         std=[0.229, 0.224, 0.225])
+        normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], 
+            std=[0.229, 0.224, 0.225]
+        )
         
         if phase == 'train':
             self.transform = transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomRotation(10),
+
+                # ----------------------------------------
+                # New grayscale augmentation
+                # ----------------------------------------
+                transforms.RandomGrayscale(p=0.25),
+
                 transforms.ToTensor(),
-                RandomMasking(p=0.5),   # 👈 ONLY CHANGE IN PIPELINE
+
+                # ----------------------------------------
+                # Softer masking
+                # ----------------------------------------
+                RandomMasking(p=0.33),
+
                 normalize
             ])
         else:
@@ -70,16 +86,16 @@ class RAFDBDataset(Dataset):
         return len(self.annotations)
 
     def __getitem__(self, idx):
+
         img_name = str(self.annotations.iloc[idx, 0])
         label = int(self.annotations.iloc[idx, 1])
-        
-        # Look inside: root_dir/label_folder/image_name
+
         img_path = os.path.join(self.root_dir, str(label), img_name)
-        
+
         if not os.path.exists(img_path):
             raise FileNotFoundError(f"Image not found: {img_path}")
 
         image = Image.open(img_path).convert('RGB')
         image = self.transform(image)
-            
+
         return image, label

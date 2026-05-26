@@ -6,10 +6,10 @@ class TruncatedFaceNet(nn.Module):
     def __init__(self, pretrained='vggface2', freeze_early_layers=True):
         super(TruncatedFaceNet, self).__init__()
         
-        # Load FaceNet pre-trained on VGGFace2[cite: 1]
+        # Load FaceNet pre-trained on VGGFace2
         facenet = InceptionResnetV1(pretrained=pretrained)
         
-        # Extract blocks, intercepting before AdaptiveAvgPool2d and Flatten
+        # Extract blocks before AdaptiveAvgPool2d and Flatten
         self.features = nn.Sequential(
             facenet.conv2d_1a,
             facenet.conv2d_2a,
@@ -26,19 +26,22 @@ class TruncatedFaceNet(nn.Module):
             facenet.block8
         )
         
-        # Freeze early layers to protect pre-trained weights[cite: 1]
+        # ---------------------------------------------------
+        # Freeze early layers only
+        # Unfreeze:
+        # mixed_7a
+        # repeat_3
+        # block8
+        # ---------------------------------------------------
         if freeze_early_layers:
-            for param in self.features[:-4].parameters():
+            for param in self.features[:10].parameters():
                 param.requires_grad = False
 
     def forward(self, x):
-        # Input: Aligned Face Tensor (Batch, 3, 224, 224)
-        # Output: Deep spatial feature map (Batch, 1792, 7, 7)
         return self.features(x)
 
 if __name__ == "__main__":
-    # Local test block
-    model = TruncatedFaceNet(pretrained=None) # pretrained=None for local shape testing
+    model = TruncatedFaceNet(pretrained=None)
     dummy_input = torch.randn(2, 3, 224, 224)
     output = model(dummy_input)
-    print(f"Output shape: {output.shape}") # Expected: [2, 1792, 7, 7]
+    print(f"Output shape: {output.shape}")
