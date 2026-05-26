@@ -14,6 +14,11 @@ BATCH_SIZE = 64
 EPOCHS = 50
 LEARNING_RATE = 1e-4
 
+# =========================================
+# Early stopping patience
+# =========================================
+EARLY_STOPPING_PATIENCE = 8
+
 # Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
 TRAIN_CSV = os.path.join(BASE_PATH, "train_labels.csv")
@@ -59,18 +64,12 @@ def train():
 
     criterion = CombinedFERLoss(feat_dim=128).to(device)
 
-    # ---------------------------------------------
-    # Original simpler optimizer
-    # ---------------------------------------------
     optimizer = optim.AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
         weight_decay=5e-5
     )
 
-    # ---------------------------------------------
-    # Original cosine scheduler
-    # ---------------------------------------------
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=EPOCHS
@@ -84,6 +83,11 @@ def train():
     }
 
     best_val_acc = 0.0
+
+    # =========================================
+    # Early stopping counter
+    # =========================================
+    epochs_without_improvement = 0
 
     log_file = open("training_log.txt", "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
@@ -167,6 +171,9 @@ def train():
 
         log_file.flush()
 
+        # =========================================
+        # Save best model
+        # =========================================
         if v_acc > best_val_acc:
 
             best_val_acc = v_acc
@@ -174,6 +181,22 @@ def train():
             torch.save(model.state_dict(), "best_frit_weights.pth")
 
             print(f"--> Saved new best weights: {v_acc:.4f}")
+
+            epochs_without_improvement = 0
+
+        else:
+            epochs_without_improvement += 1
+
+        # =========================================
+        # Early stopping
+        # =========================================
+        if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+
+            print("\n===================================")
+            print("Early stopping triggered.")
+            print("===================================")
+
+            break
 
         scheduler.step()
 

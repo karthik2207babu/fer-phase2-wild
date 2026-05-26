@@ -24,9 +24,11 @@ class TruncatedFaceNet(nn.Module):
             facenet.block8
         )
         
-        # Freeze early layers only
+        # =========================================
+        # Freeze everything except block8
+        # =========================================
         if freeze_early_layers:
-            for param in self.features[:10].parameters():
+            for param in self.features[:12].parameters():
                 param.requires_grad = False
 
     def forward(self, x):

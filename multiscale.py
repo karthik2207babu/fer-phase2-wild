@@ -47,6 +47,11 @@ class MultiScaleGlobalConv(nn.Module):
         y2 = self.branch2(x2)
         y3 = self.branch3(x3)
         y4 = self.branch4(x4)
+
+        # =========================================
+        # Reduce dominance of 7x7 branch
+        # =========================================
+        y4 = 0.7 * y4
         
         # 3. Concatenate back to 128 channels
         out = torch.cat((y1, y2, y3, y4), dim=1)
@@ -58,4 +63,4 @@ if __name__ == "__main__":
     ms_conv = MultiScaleGlobalConv()
     dummy_input = torch.randn(2, 128, 28, 28) 
     output = ms_conv(dummy_input)
-    print(f"Output shape: {output.shape}") # Expected: [2, 128, 28, 28]
+    print(f"Output shape: {output.shape}")
