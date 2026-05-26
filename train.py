@@ -12,7 +12,11 @@ from loss import CombinedFERLoss
 # --- Configuration ---
 BATCH_SIZE = 64
 EPOCHS = 50
-LEARNING_RATE = 5e-5
+
+# ----------------------------------------
+# Slightly stronger LR
+# ----------------------------------------
+LEARNING_RATE = 7e-5
 
 # Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -90,13 +94,14 @@ def train():
     )
 
     # ---------------------------------------------------
-    # Adaptive Scheduler
+    # Scheduler
+    # Increased patience
     # ---------------------------------------------------
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='max',
         factor=0.5,
-        patience=3,
+        patience=5,
         min_lr=1e-6
     )
 
@@ -214,7 +219,7 @@ def train():
             print(f"--> Saved new best weights: {v_acc:.4f}")
 
         # ---------------------------------------------------
-        # Adaptive scheduler step
+        # Scheduler step
         # ---------------------------------------------------
         scheduler.step(v_acc)
 
