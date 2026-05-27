@@ -31,7 +31,7 @@ print(f"Running on: {DEVICE}")
 # ZIP EXTRACTION
 # =========================================================
 
-ZIP_PATH = "/content/drive/MyDrive/masked_fer2013.zip"
+ZIP_PATH = "/content/drive/MyDrive/masked FER-2013.zip"
 
 EXTRACT_ROOT = "/content/data"
 
