@@ -37,7 +37,6 @@ EXTRACT_ROOT = "/content/data"
 
 EXTRACTED_PATH = os.path.join(
     EXTRACT_ROOT,
-    "masked FER-2013",
     "Masked-fer2013"
 )
 
