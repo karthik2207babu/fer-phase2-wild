@@ -64,11 +64,22 @@ def train():
 
     criterion = CombinedFERLoss(feat_dim=128).to(device)
 
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=LEARNING_RATE,
-        weight_decay=5e-5
-    )
+    # =========================================
+    # UNFREEZE BACKBONE FOR MAXIMUM CAPACITY
+    # =========================================
+    for param in model.backbone.parameters():
+        param.requires_grad = True
+
+    # =========================================
+    # DIFFERENTIAL OPTIMIZER
+    # =========================================
+    optimizer = optim.AdamW([
+        {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
+        {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
+        {'params': model.multiscale.parameters(), 'lr': LEARNING_RATE},
+        {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
+        {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
+    ], weight_decay=5e-5)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
