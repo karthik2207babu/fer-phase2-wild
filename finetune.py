@@ -26,7 +26,7 @@ TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
 # Points to your local 86.08% file
-LOAD_WEIGHTS_PATH = "best_frit_weights.pth" 
+LOAD_WEIGHTS_PATH = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights.pth"
 SAVE_WEIGHTS_PATH = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_finetuned_sgd.pth"
 
 def finetune():
