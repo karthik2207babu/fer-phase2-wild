@@ -11,13 +11,13 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 50
+EPOCHS = 60                      # 👇 CHANGED: Increased from 50
 LEARNING_RATE = 1e-4
 
 # =========================================
 # Early stopping patience
 # =========================================
-EARLY_STOPPING_PATIENCE = 8
+EARLY_STOPPING_PATIENCE = 12     # 👇 CHANGED: Increased from 8
 
 # Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -62,7 +62,8 @@ def train():
 
     model = FRITNet(num_classes=7).to(device)
 
-    criterion = CombinedFERLoss(feat_dim=128).to(device)
+    # 👇 CHANGED: Added alpha=0.2 to balance clustering with classification
+    criterion = CombinedFERLoss(feat_dim=128, alpha=0.2).to(device)
 
     # =========================================
     # UNFREEZE BACKBONE FOR MAXIMUM CAPACITY
@@ -94,9 +95,14 @@ def train():
     }
 
     best_val_acc = 0.0
+
+    # =========================================
+    # Early stopping counter
+    # =========================================
     epochs_without_improvement = 0
 
-    log_file = open("training_log.txt", "w")
+    # 👇 CHANGED: Saving log directly to Drive
+    log_file = open("/content/drive/MyDrive/FER_Phase3_Results/training_log_5token.txt", "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
     for epoch in range(EPOCHS):
@@ -175,16 +181,23 @@ def train():
         log_file.write(
             f"{epoch+1},{t_loss:.4f},{t_acc:.4f},{v_loss:.4f},{v_acc:.4f}\n"
         )
+
         log_file.flush()
 
         # =========================================
         # Save best model
         # =========================================
         if v_acc > best_val_acc:
+
             best_val_acc = v_acc
-            torch.save(model.state_dict(), "best_frit_weights.pth")
-            print(f"--> Saved new best weights: {v_acc:.4f}")
+
+            # 👇 CHANGED: Saving weights directly to Drive
+            torch.save(model.state_dict(), "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_5token.pth")
+
+            print(f"--> Saved new best weights: {v_acc:.4f} directly to Drive")
+
             epochs_without_improvement = 0
+
         else:
             epochs_without_improvement += 1
 
@@ -192,9 +205,11 @@ def train():
         # Early stopping
         # =========================================
         if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+
             print("\n===================================")
             print("Early stopping triggered.")
             print("===================================")
+
             break
 
         scheduler.step()
@@ -218,8 +233,12 @@ def train():
     plt.grid(True)
 
     plt.tight_layout()
-    plt.savefig("training_results_plot.png")
-    print("Graphs saved as training_results_plot.png")
+
+    # 👇 CHANGED: Saving plot directly to Drive
+    plt.savefig("/content/drive/MyDrive/FER_Phase3_Results/training_results_plot_5token.png")
+
+    print("Graphs saved to Drive as training_results_plot_5token.png")
+
 
 if __name__ == "__main__":
     train()
