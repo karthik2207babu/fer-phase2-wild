@@ -32,7 +32,7 @@ class SupConLoss(nn.Module):
         return loss
 
 class CombinedFERLoss(nn.Module):
-    def __init__(self, feat_dim, num_classes=7, alpha=0.1):
+    def __init__(self, feat_dim, num_classes=7, alpha=0.5):
         super(CombinedFERLoss, self).__init__()
         self.feat_dim = feat_dim
         self.alpha = alpha
@@ -53,7 +53,6 @@ class CombinedFERLoss(nn.Module):
     def forward(self, logits, features, labels):
         target = labels - 1
         
-        # 👇 ONLY CHANGE: label_smoothing added
         ce_loss = F.cross_entropy(
             logits,
             target,

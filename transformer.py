@@ -5,17 +5,20 @@ class FRITTransformer(nn.Module):
     def __init__(
         self,
         embed_dim=128,
-        num_heads=4,
-        num_layers=2,
+        num_heads=8,
+        num_layers=4,
         num_classes=7,
-        dropout=0.5
+        dropout=0.6
     ):
         super(FRITTransformer, self).__init__()
 
         # -------------------------------------------------
-        # 4 regional tokens + 1 global token = 5 tokens
+        # 4 regional tokens + 1 learnable CLS token = 5 tokens
         # -------------------------------------------------
         self.num_tokens = 5
+        
+        # Learnable CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
 
         self.pos_embed = nn.Parameter(
             torch.randn(1, self.num_tokens, embed_dim)
@@ -48,17 +51,15 @@ class FRITTransformer(nn.Module):
         B, C, H, W = x.shape
 
         # =================================================
-        # 2×2 regional partition
+        # OVERLAPPING REGIONAL PARTITION (16x16 patches)
         # =================================================
-
-        h_mid = H // 2
-        w_mid = W // 2
+        patch_size = 16
 
         regions = [
-            x[:, :, :h_mid, :w_mid],   # top-left
-            x[:, :, :h_mid, w_mid:],   # top-right
-            x[:, :, h_mid:, :w_mid],   # bottom-left
-            x[:, :, h_mid:, w_mid:]    # bottom-right
+            x[:, :, :patch_size, :patch_size],    # top-left
+            x[:, :, :patch_size, -patch_size:],   # top-right
+            x[:, :, -patch_size:, :patch_size],   # bottom-left
+            x[:, :, -patch_size:, -patch_size:]   # bottom-right
         ]
 
         regional_tokens = []
@@ -68,34 +69,23 @@ class FRITTransformer(nn.Module):
             regional_tokens.append(token)
 
         regional_tokens = torch.stack(regional_tokens, dim=1)
-        # Shape: (B,4,128)
+        # Shape: (B, 4, 128)
 
-        global_token = x.mean(dim=[2, 3]).unsqueeze(1)
-        # Shape: (B,1,128)
+        # Expand CLS token for the batch
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        # Shape: (B, 1, 128)
 
-        T = torch.cat([global_token, regional_tokens], dim=1)
-        # Shape: (B,5,128)
+        T = torch.cat([cls_tokens, regional_tokens], dim=1)
+        # Shape: (B, 5, 128)
 
         T = T + self.pos_embed
         T = self.pos_drop(T)
 
-        T = self.transformer(T)
+        out = self.transformer(T)
+        
+        # Only extract the CLS token for classification
+        cls_out = out[:, 0, :]
+        
+        logits = self.head(cls_out)
 
-        # Use global token
-        features = T[:, 0, :]
-
-        logits = self.head(features)
-
-        return logits, features
-
-
-if __name__ == "__main__":
-
-    dummy_input = torch.randn(2, 128, 28, 28)
-
-    model = FRITTransformer()
-
-    logits, features = model(dummy_input)
-
-    print("Logits shape:", logits.shape)
-    print("Features shape:", features.shape)
+        return logits, cls_out

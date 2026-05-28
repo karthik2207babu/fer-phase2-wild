@@ -9,38 +9,40 @@ import torch
 # Controlled Random Masking
 # ============================
 class RandomMasking:
-    def __init__(self, p=0.33, min_area=0.04, max_area=0.3):
-        self.p = p
+    def __init__(self, min_area=0.04, max_area=0.2):
         self.min_area = min_area
         self.max_area = max_area
 
     def __call__(self, img):
-
-        if torch.rand(1).item() > self.p:
+        rand_val = torch.rand(1).item()
+        
+        # 20% chance of NO mask (0.8 to 1.0)
+        if rand_val > 0.8:
             return img
 
         C, H, W = img.shape
         area = H * W
 
-        mask_area = torch.empty(1).uniform_(
-            self.min_area,
-            self.max_area
-        ).item() * area
-
+        mask_area = torch.empty(1).uniform_(self.min_area, self.max_area).item() * area
         aspect_ratio = torch.empty(1).uniform_(0.3, 3.3).item()
 
         h = int((mask_area * aspect_ratio) ** 0.5)
         w = int((mask_area / aspect_ratio) ** 0.5)
 
-        if h >= H or w >= W:
+        if h >= H // 2 or w >= W:
             return img
 
-        # Fully random masking location
-        top = torch.randint(0, H - h, (1,)).item()
+        # Random horizontal placement
         left = torch.randint(0, W - w, (1,)).item()
 
-        img[:, top:top+h, left:left+w] = 0
+        if rand_val <= 0.4:
+            # 40% chance: Upper region (0 to H/2)
+            top = torch.randint(0, max(1, (H // 2) - h), (1,)).item()
+        else:
+            # 40% chance: Lower region (H/2 to H)
+            top = torch.randint(H // 2, max((H // 2) + 1, H - h), (1,)).item()
 
+        img[:, top:top+h, left:left+w] = 0
         return img
 
 
@@ -61,12 +63,21 @@ class RAFDBDataset(Dataset):
             self.transform = transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.RandomHorizontalFlip(),
-                transforms.RandomRotation(10),
+                
+                # Kaggle-inspired Augmentations
+                transforms.RandomAffine(
+                    degrees=0, 
+                    translate=(0.1, 0.1), # Translate images 10% in x and y
+                    scale=(0.5, 1.5)      # Zoom in/out by 50%
+                ),
+                transforms.ColorJitter(
+                    contrast=0.1          # Adjust contrast
+                ),
 
                 transforms.ToTensor(),
 
-                # Softer masking only
-                RandomMasking(p=0.33),
+                # 40% upper, 40% lower, 20% none
+                RandomMasking(min_area=0.04, max_area=0.2),
 
                 normalize
             ])
@@ -97,7 +108,6 @@ class RAFDBDataset(Dataset):
             raise FileNotFoundError(f"Image not found: {img_path}")
 
         image = Image.open(img_path).convert('RGB')
-
         image = self.transform(image)
 
         return image, label

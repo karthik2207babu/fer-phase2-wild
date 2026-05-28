@@ -27,10 +27,10 @@ class FRITNet(nn.Module):
         # 5. Transformer: Global correlation and final classification
         self.transformer = FRITTransformer(
             embed_dim=128, 
-            num_heads=4, 
-            num_layers=2, 
+            num_heads=8,      # Increased capacity
+            num_layers=4,     # Deepened
             num_classes=num_classes, 
-            dropout=0.5
+            dropout=0.6       # Heavier dropout for regularization
         )
 
     def forward(self, x):
@@ -46,14 +46,7 @@ class FRITNet(nn.Module):
         return logits, features
 
 if __name__ == "__main__":
-    # Full pipeline dimension test
-    # Note: This will download VGGFace2 weights (~100MB) if run for the first time
     model = FRITNet()
-    dummy_input = torch.randn(2, 3, 224, 224) 
-    
-    print("Passing tensor through the full FRIT network...")
+    dummy_input = torch.randn(2, 3, 224, 224)
     logits, features = model(dummy_input)
-    
-    print(f"Final Logits shape: {logits.shape}")     # Expected: [2, 7]
-    print(f"Final Features shape: {features.shape}") # Expected: [2, 128]
-    print("Pipeline successfully connected!")
+    print(f"Logits shape: {logits.shape}")
