@@ -68,7 +68,7 @@ class RAFDBDataset(Dataset):
                 transforms.RandomAffine(
                     degrees=0, 
                     translate=(0.1, 0.1), # Translate images 10% in x and y
-                    scale=(0.5, 1.5)      # Zoom in/out by 50%
+                    scale=(0.9, 1.1)      # Zoom in/out by 50%
                 ),
                 transforms.ColorJitter(
                     contrast=0.1          # Adjust contrast

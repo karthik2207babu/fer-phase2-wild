@@ -30,7 +30,7 @@ class FRITNet(nn.Module):
             num_heads=8,      # Increased capacity
             num_layers=4,     # Deepened
             num_classes=num_classes, 
-            dropout=0.6       # Heavier dropout for regularization
+            dropout=0.4       # Heavier dropout for regularization
         )
 
     def forward(self, x):
