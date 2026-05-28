@@ -11,12 +11,12 @@ from model import FRITNet
 from loss import CombinedFERLoss
 
 # =========================================
-# COOLDOWN CONFIGURATION
+# COOLDOWN CONFIGURATION (SGD + Freeze)
 # =========================================
 BATCH_SIZE = 64
 EPOCHS = 15
-LEARNING_RATE = 1e-5  # 10x smaller for fine-tuning
-EARLY_STOPPING_PATIENCE = 5
+LEARNING_RATE = 1e-3  # SGD needs a slightly higher LR than Adam
+EARLY_STOPPING_PATIENCE = 8
 
 # Dataset Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -25,63 +25,67 @@ VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
 TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
-# Paths based on your Google Drive screenshot
-LOAD_WEIGHTS_PATH = "best_frit_weights.pth"
-SAVE_WEIGHTS_PATH = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_finetuned.pth"
+# Points to your local 86.08% file
+LOAD_WEIGHTS_PATH = "best_frit_weights.pth" 
+SAVE_WEIGHTS_PATH = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_finetuned_sgd.pth"
 
 def finetune():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Starting cooldown fine-tuning on: {device}")
+    print(f"Starting SGD cooldown fine-tuning on: {device}")
 
-    # 1. Load Datasets
+    # 1. Load Datasets & Apply Clean Transforms
     train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
 
-    # 2. OVERRIDE HEAVY AUGMENTATIONS (Clean data for cooldown)
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     clean_train_transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(), # Only keep the flip
+        transforms.RandomHorizontalFlip(), # Clean data, only flipping
         transforms.ToTensor(),
         normalize
     ])
     train_dataset.transform = clean_train_transform
-    print("Heavy augmentations disabled. Using clean data for fine-tuning.")
+    print("Heavy augmentations disabled. Using clean data.")
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
-    # 3. Load Model & Weights
+    # 2. Load Model & Weights
     model = FRITNet(num_classes=7).to(device)
     
     if os.path.exists(LOAD_WEIGHTS_PATH):
         model.load_state_dict(torch.load(LOAD_WEIGHTS_PATH, map_location=device))
-        print(f"✅ Successfully loaded 86.08% weights from: {LOAD_WEIGHTS_PATH}")
+        print(f"✅ Loaded 86.08% weights from: {LOAD_WEIGHTS_PATH}")
     else:
         raise FileNotFoundError(f"Could not find weights at {LOAD_WEIGHTS_PATH}")
 
-    # Alpha set to 0.2 to prioritize classification accuracy over clustering now
+    # Lower alpha to prioritize pure classification accuracy
     criterion = CombinedFERLoss(feat_dim=128, alpha=0.2).to(device)
 
-    # 4. Differential Optimizer (Extremely slow learning rate)
+    # =====================================================
+    # 3. HARD FREEZE BACKBONE (Kills Identity Memorization)
+    # =====================================================
     for param in model.backbone.parameters():
-        param.requires_grad = True
+        param.requires_grad = False
+    print("Backbone frozen. Network must rely on emotional features.")
 
-    optimizer = optim.AdamW([
-        {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
+    # =====================================================
+    # 4. SGD OPTIMIZER (Glides into better generalization)
+    # =====================================================
+    optimizer = optim.SGD([
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
         {'params': model.multiscale.parameters(), 'lr': LEARNING_RATE},
         {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
-    ], weight_decay=5e-5)
+    ], momentum=0.9, weight_decay=5e-4)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
-    best_val_acc = 0.8608 # Starting threshold
+    best_val_acc = 0.8608
     epochs_without_improvement = 0
 
-    log_file = open("/content/drive/MyDrive/FER_Phase3_Results/finetune_log.txt", "w")
+    log_file = open("/content/drive/MyDrive/FER_Phase3_Results/finetune_sgd_log.txt", "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
     for epoch in range(EPOCHS):
@@ -167,19 +171,19 @@ def finetune():
     plt.subplot(1, 2, 1)
     plt.plot(history['train_acc'], label='Train Acc')
     plt.plot(history['val_acc'], label='Val Acc')
-    plt.title('Fine-Tuning Accuracy')
+    plt.title('SGD Fine-Tuning Accuracy')
     plt.legend()
     plt.grid(True)
 
     plt.subplot(1, 2, 2)
     plt.plot(history['train_loss'], label='Train Loss')
     plt.plot(history['val_loss'], label='Val Loss')
-    plt.title('Fine-Tuning Loss')
+    plt.title('SGD Fine-Tuning Loss')
     plt.legend()
     plt.grid(True)
 
     plt.tight_layout()
-    plot_path = "/content/drive/MyDrive/FER_Phase3_Results/finetune_plot.png"
+    plot_path = "/content/drive/MyDrive/FER_Phase3_Results/finetune_sgd_plot.png"
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
     print(f"Best Fine-Tuned Validation Accuracy: {best_val_acc:.4f}")
