@@ -26,7 +26,7 @@ TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
 # Paths based on your Google Drive screenshot
-LOAD_WEIGHTS_PATH = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights.pth"
+LOAD_WEIGHTS_PATH = "best_frit_weights.pth"
 SAVE_WEIGHTS_PATH = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_finetuned.pth"
 
 def finetune():
