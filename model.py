@@ -27,10 +27,10 @@ class FRITNet(nn.Module):
         # 5. Transformer: Global correlation and final classification
         self.transformer = FRITTransformer(
             embed_dim=128, 
-            num_heads=8,      # Increased capacity
-            num_layers=4,     # Deepened
+            num_heads=4,      # 👇 CHANGED: Back to 4 heads
+            num_layers=2,     # 👇 CHANGED: Back to 2 layers
             num_classes=num_classes, 
-            dropout=0.4       # Heavier dropout for regularization
+            dropout=0.3       # 👇 CHANGED: Relaxed dropout for a smaller model
         )
 
     def forward(self, x):

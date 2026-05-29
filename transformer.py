@@ -5,10 +5,10 @@ class FRITTransformer(nn.Module):
     def __init__(
         self,
         embed_dim=128,
-        num_heads=8,
-        num_layers=4,
+        num_heads=4,      # 👇 CHANGED: Default back to 4
+        num_layers=2,     # 👇 CHANGED: Default back to 2
         num_classes=7,
-        dropout=0.6
+        dropout=0.3       # 👇 CHANGED: Default relaxed to 0.3
     ):
         super(FRITTransformer, self).__init__()
 
@@ -51,15 +51,16 @@ class FRITTransformer(nn.Module):
         B, C, H, W = x.shape
 
         # =================================================
-        # OVERLAPPING REGIONAL PARTITION (16x16 patches)
+        # HARD 2x2 REGIONAL PARTITION (Non-overlapping)
         # =================================================
-        patch_size = 16
+        h_mid = H // 2
+        w_mid = W // 2
 
         regions = [
-            x[:, :, :patch_size, :patch_size],    # top-left
-            x[:, :, :patch_size, -patch_size:],   # top-right
-            x[:, :, -patch_size:, :patch_size],   # bottom-left
-            x[:, :, -patch_size:, -patch_size:]   # bottom-right
+            x[:, :, :h_mid, :w_mid],   # top-left
+            x[:, :, :h_mid, w_mid:],   # top-right
+            x[:, :, h_mid:, :w_mid],   # bottom-left
+            x[:, :, h_mid:, w_mid:]    # bottom-right
         ]
 
         regional_tokens = []
