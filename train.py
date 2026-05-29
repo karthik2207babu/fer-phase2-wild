@@ -11,7 +11,7 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 60                      # 👇 CHANGED: Increased from 50
+EPOCHS = 50                      # 👇 CHANGED: Increased from 50
 LEARNING_RATE = 1e-4
 
 # =========================================
