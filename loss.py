@@ -50,7 +50,7 @@ class CombinedFERLoss(nn.Module):
         
         self.register_buffer('class_weights', weights)
 
-    def forward(self, logits, features, labels):
+    def forward(self, logits, features, labels, aux_global=None, aux_local=None):
         target = labels - 1
         
         ce_loss = F.cross_entropy(
@@ -61,5 +61,11 @@ class CombinedFERLoss(nn.Module):
         )
         
         supcon_loss = self.supcon(features, target)
-        
-        return ce_loss + (self.alpha * supcon_loss)
+        total_loss = ce_loss + (self.alpha * supcon_loss)
+
+        if aux_global is not None and aux_local is not None:
+            loss_global = F.cross_entropy(aux_global, target, weight=self.class_weights, label_smoothing=0.1)
+            loss_local = F.cross_entropy(aux_local, target, weight=self.class_weights, label_smoothing=0.1)
+            total_loss = total_loss + loss_global + loss_local
+            
+        return total_loss

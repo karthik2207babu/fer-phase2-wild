@@ -11,13 +11,9 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 50                      # 👇 CHANGED: Increased from 50
+EPOCHS = 50
 LEARNING_RATE = 1e-4
-
-# =========================================
-# Early stopping patience
-# =========================================
-EARLY_STOPPING_PATIENCE = 12     # 👇 CHANGED: Increased from 8
+EARLY_STOPPING_PATIENCE = 12
 
 # Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -62,18 +58,13 @@ def train():
 
     model = FRITNet(num_classes=7).to(device)
 
-    # 👇 CHANGED: Added alpha=0.2 to balance clustering with classification
     criterion = CombinedFERLoss(feat_dim=128, alpha=0.2).to(device)
 
-    # =========================================
     # UNFREEZE BACKBONE FOR MAXIMUM CAPACITY
-    # =========================================
     for param in model.backbone.parameters():
         param.requires_grad = True
 
-    # =========================================
     # DIFFERENTIAL OPTIMIZER
-    # =========================================
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
@@ -95,13 +86,8 @@ def train():
     }
 
     best_val_acc = 0.0
-
-    # =========================================
-    # Early stopping counter
-    # =========================================
     epochs_without_improvement = 0
 
-    # 👇 CHANGED: Saving log directly to Drive
     log_file = open("/content/drive/MyDrive/FER_Phase3_Results/training_log_5token.txt", "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -122,9 +108,9 @@ def train():
 
             optimizer.zero_grad()
 
-            logits, features = model(images)
+            logits, features, aux_global, aux_local = model(images)
 
-            loss = criterion(logits, features, labels)
+            loss = criterion(logits, features, labels, aux_global, aux_local)
 
             loss.backward()
 
@@ -153,9 +139,9 @@ def train():
                 images = images.to(device)
                 labels = labels.to(device)
 
-                logits, features = model(images)
+                logits, features, aux_global, aux_local = model(images)
 
-                loss = criterion(logits, features, labels)
+                loss = criterion(logits, features, labels, aux_global, aux_local)
 
                 val_loss += loss.item()
 
@@ -184,32 +170,18 @@ def train():
 
         log_file.flush()
 
-        # =========================================
-        # Save best model
-        # =========================================
         if v_acc > best_val_acc:
-
             best_val_acc = v_acc
-
-            # 👇 CHANGED: Saving weights directly to Drive
             torch.save(model.state_dict(), "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_5token.pth")
-
             print(f"--> Saved new best weights: {v_acc:.4f} directly to Drive")
-
             epochs_without_improvement = 0
-
         else:
             epochs_without_improvement += 1
 
-        # =========================================
-        # Early stopping
-        # =========================================
         if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
-
             print("\n===================================")
             print("Early stopping triggered.")
             print("===================================")
-
             break
 
         scheduler.step()
@@ -234,9 +206,7 @@ def train():
 
     plt.tight_layout()
 
-    # 👇 CHANGED: Saving plot directly to Drive
     plt.savefig("/content/drive/MyDrive/FER_Phase3_Results/training_results_plot_5token.png")
-
     print("Graphs saved to Drive as training_results_plot_5token.png")
 
 

@@ -5,19 +5,14 @@ class FRITTransformer(nn.Module):
     def __init__(
         self,
         embed_dim=128,
-        num_heads=4,      # 👇 CHANGED: Default back to 4
-        num_layers=2,     # 👇 CHANGED: Default back to 2
+        num_heads=8,      
+        num_layers=4,     
         num_classes=7,
-        dropout=0.3       # 👇 CHANGED: Default relaxed to 0.3
+        dropout=0.4       
     ):
         super(FRITTransformer, self).__init__()
 
-        # -------------------------------------------------
-        # 4 regional tokens + 1 learnable CLS token = 5 tokens
-        # -------------------------------------------------
         self.num_tokens = 5
-        
-        # Learnable CLS token
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
 
         self.pos_embed = nn.Parameter(
@@ -46,38 +41,41 @@ class FRITTransformer(nn.Module):
             nn.Linear(embed_dim, num_classes)
         )
 
-    def forward(self, x):
+        # JOINT OPTIMIZATION Auxiliary Heads
+        self.aux_global_head = nn.Linear(embed_dim, num_classes)
+        self.aux_local_head = nn.Linear(embed_dim, num_classes)
 
+    def forward(self, x):
         B, C, H, W = x.shape
 
-        # =================================================
-        # HARD 2x2 REGIONAL PARTITION (Non-overlapping)
-        # =================================================
-        h_mid = H // 2
-        w_mid = W // 2
+        # 1. Global Auxiliary Prediction
+        global_feat = x.mean(dim=[2, 3])
+        aux_global_logits = self.aux_global_head(global_feat)
 
+        # 2. OVERLAPPING 16x16 REGIONAL PARTITION
+        patch_size = 16
         regions = [
-            x[:, :, :h_mid, :w_mid],   # top-left
-            x[:, :, :h_mid, w_mid:],   # top-right
-            x[:, :, h_mid:, :w_mid],   # bottom-left
-            x[:, :, h_mid:, w_mid:]    # bottom-right
+            x[:, :, :patch_size, :patch_size],   # top-left
+            x[:, :, :patch_size, -patch_size:],  # top-right
+            x[:, :, -patch_size:, :patch_size],  # bottom-left
+            x[:, :, -patch_size:, -patch_size:]  # bottom-right
         ]
 
         regional_tokens = []
-
         for region in regions:
             token = region.mean(dim=[2, 3])
             regional_tokens.append(token)
 
         regional_tokens = torch.stack(regional_tokens, dim=1)
-        # Shape: (B, 4, 128)
+
+        # 3. Local Auxiliary Prediction
+        local_feat = regional_tokens.mean(dim=1)
+        aux_local_logits = self.aux_local_head(local_feat)
 
         # Expand CLS token for the batch
         cls_tokens = self.cls_token.expand(B, -1, -1)
-        # Shape: (B, 1, 128)
 
         T = torch.cat([cls_tokens, regional_tokens], dim=1)
-        # Shape: (B, 5, 128)
 
         T = T + self.pos_embed
         T = self.pos_drop(T)
@@ -86,7 +84,6 @@ class FRITTransformer(nn.Module):
         
         # Only extract the CLS token for classification
         cls_out = out[:, 0, :]
-        
         logits = self.head(cls_out)
 
-        return logits, cls_out
+        return logits, cls_out, aux_global_logits, aux_local_logits
