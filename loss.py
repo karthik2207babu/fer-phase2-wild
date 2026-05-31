@@ -39,33 +39,22 @@ class CombinedFERLoss(nn.Module):
         self.supcon = SupConLoss(temperature=0.07)
         
         weights = torch.tensor([
-            0.2178,
-            1.0000,
-            0.3919,
-            0.0589,
-            0.1418,
-            0.3986,
-            0.1113
+            0.2178, 1.0000, 0.3919, 0.0589, 0.1418, 0.3986, 0.1113
         ])
-        
         self.register_buffer('class_weights', weights)
 
     def forward(self, logits, features, labels, aux_global=None, aux_local=None):
         target = labels - 1
         
-        ce_loss = F.cross_entropy(
-            logits,
-            target,
-            weight=self.class_weights,
-            label_smoothing=0.1
-        )
-        
+        # AGGRESSIVE LABEL SMOOTHING = 0.25
+        ce_loss = F.cross_entropy(logits, target, weight=self.class_weights, label_smoothing=0.25)
         supcon_loss = self.supcon(features, target)
+        
         total_loss = ce_loss + (self.alpha * supcon_loss)
 
         if aux_global is not None and aux_local is not None:
-            loss_global = F.cross_entropy(aux_global, target, weight=self.class_weights, label_smoothing=0.1)
-            loss_local = F.cross_entropy(aux_local, target, weight=self.class_weights, label_smoothing=0.1)
+            loss_global = F.cross_entropy(aux_global, target, weight=self.class_weights, label_smoothing=0.25)
+            loss_local = F.cross_entropy(aux_local, target, weight=self.class_weights, label_smoothing=0.25)
             total_loss = total_loss + loss_global + loss_local
             
         return total_loss

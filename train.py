@@ -24,7 +24,6 @@ VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 SAVE_DIR = "/content/drive/MyDrive/FER_Phase3_Results"
 
 def train():
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Starting training on: {device}")
 
@@ -46,13 +45,13 @@ def train():
     for param in model.backbone.parameters():
         param.requires_grad = True
 
+    # OPTIMIZER: multiscale completely removed
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
-        {'params': model.multiscale.parameters(), 'lr': LEARNING_RATE},
         {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
-    ], weight_decay=1e-4) # High weight decay for 10-token stability
+    ], weight_decay=1e-4)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
@@ -60,7 +59,7 @@ def train():
     best_val_acc = 0.0
     epochs_without_improvement = 0
 
-    log_file_path = os.path.join(SAVE_DIR, "training_log_10token.txt")
+    log_file_path = os.path.join(SAVE_DIR, "training_log_hybrid.txt")
     log_file = open(log_file_path, "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -109,7 +108,7 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_10token.pth")
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_hybrid.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
@@ -129,7 +128,7 @@ def train():
     plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
     plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     
-    plot_path = os.path.join(SAVE_DIR, "training_results_plot_10token.png")
+    plot_path = os.path.join(SAVE_DIR, "training_results_plot_hybrid.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
