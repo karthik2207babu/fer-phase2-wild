@@ -12,7 +12,8 @@ class FRITTransformer(nn.Module):
     ):
         super(FRITTransformer, self).__init__()
 
-        self.num_tokens = 5
+        # 9 local regions + 1 CLS token = 10 tokens
+        self.num_tokens = 10
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
 
         self.pos_embed = nn.Parameter(
@@ -52,29 +53,30 @@ class FRITTransformer(nn.Module):
         global_feat = x.mean(dim=[2, 3])
         aux_global_logits = self.aux_global_head(global_feat)
 
-        # 2. OVERLAPPING 16x16 REGIONAL PARTITION
-        patch_size = 16
-        regions = [
-            x[:, :, :patch_size, :patch_size],   # top-left
-            x[:, :, :patch_size, -patch_size:],  # top-right
-            x[:, :, -patch_size:, :patch_size],  # bottom-left
-            x[:, :, -patch_size:, -patch_size:]  # bottom-right
-        ]
+        # 2. 3x3 OVERLAPPING REGIONAL PARTITION (9 Patches)
+        # 12x12 patches with a stride of 8 fits a 28x28 map perfectly.
+        patch_size = 12
+        stride = 8
+        regions = []
+        
+        for i in range(3):
+            for j in range(3):
+                h_start = i * stride
+                w_start = j * stride
+                patch = x[:, :, h_start:h_start+patch_size, w_start:w_start+patch_size]
+                regions.append(patch.mean(dim=[2, 3]))
 
-        regional_tokens = []
-        for region in regions:
-            token = region.mean(dim=[2, 3])
-            regional_tokens.append(token)
+        # Stack into (B, 9, 128)
+        regional_tokens = torch.stack(regions, dim=1)
 
-        regional_tokens = torch.stack(regional_tokens, dim=1)
-
-        # 3. Local Auxiliary Prediction
+        # 3. Local Auxiliary Prediction (Averaging all 9 tokens)
         local_feat = regional_tokens.mean(dim=1)
         aux_local_logits = self.aux_local_head(local_feat)
 
         # Expand CLS token for the batch
         cls_tokens = self.cls_token.expand(B, -1, -1)
 
+        # Concatenate CLS with the 9 regional tokens -> (B, 10, 128)
         T = torch.cat([cls_tokens, regional_tokens], dim=1)
 
         T = T + self.pos_embed

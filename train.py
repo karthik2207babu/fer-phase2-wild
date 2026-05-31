@@ -8,46 +8,51 @@ import os
 from dataset import RAFDBDataset
 from model import FRITNet
 from loss import CombinedFERLoss
-import config  # Importing your new portability config
 
-# --- Hyperparameters ---
+# --- Configuration ---
 BATCH_SIZE = 64
 EPOCHS = 50
 LEARNING_RATE = 1e-4
 EARLY_STOPPING_PATIENCE = 12
 
+# Colab Paths
+BASE_PATH = "/content/data/Datasets/RAF-DB"
+TRAIN_CSV = os.path.join(BASE_PATH, "train_labels.csv")
+VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
+TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
+VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
+SAVE_DIR = "/content/drive/MyDrive/FER_Phase3_Results"
+
 def train():
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Starting training on: {device}")
 
-    # Initialize Datasets using paths from config
-    train_dataset = RAFDBDataset(csv_file=config.TRAIN_CSV, root_dir=config.TRAIN_ROOT, phase='train')
-    val_dataset = RAFDBDataset(csv_file=config.VAL_CSV, root_dir=config.VAL_ROOT, phase='val')
+    train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
+    val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
     print(f"Ready! Training on {len(train_dataset)} images.")
 
-    # Initialize Model
     model = FRITNet(num_classes=7).to(device)
-    criterion = CombinedFERLoss(feat_dim=128, alpha=0.2).to(device)
 
-    # Ensure save directory exists
-    os.makedirs(config.SAVE_DIR, exist_ok=True)
+    # Aggressive Regularization: alpha=0.5
+    criterion = CombinedFERLoss(feat_dim=128, alpha=0.5).to(device)
 
-    # Unfreeze Backbone
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
     for param in model.backbone.parameters():
         param.requires_grad = True
 
-    # Optimizer
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
         {'params': model.multiscale.parameters(), 'lr': LEARNING_RATE},
         {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
-    ], weight_decay=1e-4) # Increased decay for 10-token stability
+    ], weight_decay=1e-4) # High weight decay for 10-token stability
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
@@ -55,8 +60,8 @@ def train():
     best_val_acc = 0.0
     epochs_without_improvement = 0
 
-    # Open log file
-    log_file = open(config.LOG_FILE_PATH, "w")
+    log_file_path = os.path.join(SAVE_DIR, "training_log_10token.txt")
+    log_file = open(log_file_path, "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
     for epoch in range(EPOCHS):
@@ -68,7 +73,6 @@ def train():
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
             
-            # Forward pass with Auxiliary outputs
             logits, features, aux_global, aux_local = model(images)
             loss = criterion(logits, features, labels, aux_global, aux_local)
             
@@ -105,24 +109,29 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            torch.save(model.state_dict(), config.BEST_WEIGHTS_PATH)
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_10token.pth")
+            torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
 
         if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+            print("\n===================================")
+            print("Early stopping triggered.")
+            print("===================================")
             break
         scheduler.step()
 
     log_file.close()
     
-    # Plotting
     plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1); plt.plot(history['train_acc']); plt.plot(history['val_acc']); plt.title('Accuracy')
-    plt.subplot(1, 2, 2); plt.plot(history['train_loss']); plt.plot(history['val_loss']); plt.title('Loss')
-    plt.savefig(config.PLOT_PATH)
-    print(f"Graphs saved to {config.PLOT_PATH}")
+    plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
+    plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
+    
+    plot_path = os.path.join(SAVE_DIR, "training_results_plot_10token.png")
+    plt.savefig(plot_path)
+    print(f"Graphs saved to {plot_path}")
 
 if __name__ == "__main__":
     train()
