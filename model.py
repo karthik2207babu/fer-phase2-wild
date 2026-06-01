@@ -17,12 +17,11 @@ class FRITNet(nn.Module):
         # 2. Spatial Noise Gate
         self.safm = SAFM(kernel_size=7)
         
-        # 3. Dual-Stage Relation Transformer
+        # 3. Cross-Attention Relation Transformer
         self.transformer = FRITTransformer(
             embed_dim=128, 
             num_heads=8,      
             num_local_layers=2,  
-            num_fusion_layers=2, 
             num_classes=num_classes, 
             dropout=0.5       
         )
