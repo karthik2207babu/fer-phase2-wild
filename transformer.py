@@ -7,15 +7,17 @@ class FRITTransformer(nn.Module):
         embed_dim=128,
         num_heads=8,      
         num_local_layers=2,  
-        num_fusion_layers=2, 
         num_classes=7,
         dropout=0.5       
     ):
         super(FRITTransformer, self).__init__()
 
         self.num_patches = 9
+        self.pos_drop = nn.Dropout(p=dropout)
         
-        # 1. LOCAL RELATION TRANSFORMER
+        # ==========================================
+        # 1. LOCAL RELATION TRANSFORMER (Self-Attention)
+        # ==========================================
         self.local_pos_embed = nn.Parameter(torch.randn(1, self.num_patches, embed_dim))
         local_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim, nhead=num_heads, dim_feedforward=embed_dim * 4,
@@ -23,24 +25,33 @@ class FRITTransformer(nn.Module):
         )
         self.local_transformer = nn.TransformerEncoder(local_layer, num_layers=num_local_layers)
 
-        # 2. GLOBAL FUSION TRANSFORMER
+        # ==========================================
+        # 2. GLOBAL-LOCAL FUSION (Cross-Attention)
+        # ==========================================
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
-        self.fusion_pos_embed = nn.Parameter(torch.randn(1, self.num_patches + 1, embed_dim))
-        fusion_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim, nhead=num_heads, dim_feedforward=embed_dim * 4,
-            dropout=dropout, activation='gelu', batch_first=True
-        )
-        self.fusion_transformer = nn.TransformerEncoder(fusion_layer, num_layers=num_fusion_layers)
-
-        self.pos_drop = nn.Dropout(p=dropout)
         
+        # Native PyTorch Cross-Attention
+        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        
+        # Feed Forward Network for the Cross-Attention block
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim * 4, embed_dim),
+            nn.Dropout(dropout)
+        )
+
+        # ==========================================
+        # 3. JOINT OPTIMIZATION HEADS
+        # ==========================================
         self.head = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Dropout(dropout),
             nn.Linear(embed_dim, num_classes)
         )
-        
-        # 3. JOINT OPTIMIZATION HEADS
         self.aux_global_head = nn.Linear(embed_dim, num_classes)
         self.aux_local_head = nn.Linear(embed_dim, num_classes)
 
@@ -63,21 +74,32 @@ class FRITTransformer(nn.Module):
         
         regional_tokens = torch.stack(regions, dim=1) 
 
-        # --- C. LOCAL RELATION TRANSFORMER ---
+        # --- C. LOCAL RELATION (Self-Attention on Patches) ---
         T_local = self.pos_drop(regional_tokens + self.local_pos_embed)
-        T_local_out = self.local_transformer(T_local)
+        T_local_out = self.local_transformer(T_local) # Shape: (B, 9, 128)
         
         local_feat = T_local_out.mean(dim=1)
         aux_local_logits = self.aux_local_head(local_feat)
 
-        # --- D. GLOBAL FUSION TRANSFORMER ---
-        cls_tokens = self.cls_token.expand(B, -1, -1) 
-        T_fusion = torch.cat([cls_tokens, T_local_out], dim=1) 
-        T_fusion = self.pos_drop(T_fusion + self.fusion_pos_embed)
+        # --- D. GLOBAL-LOCAL FUSION (Cross-Attention) ---
+        # Query (Q) = Global CLS Token
+        # Keys (K) & Values (V) = Local Patch Tokens
         
-        out = self.fusion_transformer(T_fusion)
+        cls_tokens = self.cls_token.expand(B, -1, -1) # Shape: (B, 1, 128)
         
-        cls_out = out[:, 0, :]
+        # Q=cls_tokens, K=T_local_out, V=T_local_out
+        attn_out, _ = self.cross_attn(query=cls_tokens, key=T_local_out, value=T_local_out)
+        
+        # Add & Norm
+        cls_tokens = self.norm1(cls_tokens + attn_out)
+        
+        # Feed-Forward & Norm
+        ffn_out = self.ffn(cls_tokens)
+        cls_tokens = self.norm2(cls_tokens + ffn_out) # Shape: (B, 1, 128)
+        
+        # --- E. FINAL PREDICTION ---
+        # Squeeze out the sequence dimension (B, 1, 128) -> (B, 128)
+        cls_out = cls_tokens.squeeze(1) 
         logits = self.head(cls_out)
 
         return logits, cls_out, aux_global_logits, aux_local_logits
