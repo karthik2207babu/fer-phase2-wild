@@ -10,38 +10,37 @@ from loss_ferplus import FERPlusMRANLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 25                 # Hard-capped to 25 epochs
-LEARNING_RATE = 1e-4
+EPOCHS = 25
+LEARNING_RATE = 5e-5        # Dropped by half to prevent rapid memorization
 EARLY_STOPPING_PATIENCE = 10
 SAVE_DIR = "/content/drive/MyDrive/FERPlus_Results"
 
 def train_ferplus():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Starting Highly-Regularized FERPlus Training on: {device}")
+    print(f"Starting Locked-Backbone FERPlus Training on: {device}")
     
     os.makedirs(SAVE_DIR, exist_ok=True)
     
-    # Extract data and build loaders
     data_root = prepare_ferplus_data()
     train_loader, val_loader = get_ferplus_dataloaders(data_root, batch_size=BATCH_SIZE)
 
-    # Initialize model with 8 classes for FERPlus
     model = FRITNet(num_classes=8).to(device)
     criterion = FERPlusMRANLoss().to(device)
 
-    # Full parameter optimization
+    # ==========================================
+    # THE FIX: HARD FREEZE THE BACKBONE
+    # ==========================================
+    print("--> Freezing CNN Backbone to force Transformer learning...")
     for param in model.backbone.parameters():
-        param.requires_grad = True
+        param.requires_grad = False  # LOCKED.
 
-    # HIGH OVERFITTING MEASURE: weight_decay locked at 1e-3
+    # Optimizer now only trains your custom modules (LFA, SAFM, Transformer)
     optimizer = optim.AdamW([
-        {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
         {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
     ], weight_decay=1e-3) 
 
-    # Scheduler aligns with the new 25-epoch cap
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     best_val_acc = 0.0
@@ -57,7 +56,6 @@ def train_ferplus():
             images, labels = images.to(device), labels.to(device)
             
             optimizer.zero_grad()
-            
             logits, _, aux_global, aux_local = model(images)
             
             loss = criterion(logits, aux_global, aux_local, labels)
@@ -71,7 +69,6 @@ def train_ferplus():
             
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
-        # --- Validation Loop ---
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
         with torch.no_grad():
@@ -112,22 +109,10 @@ def train_ferplus():
             
         scheduler.step()
 
-    # Save tracking curves
     plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    plt.plot(history['train_acc'], label='Train')
-    plt.plot(history['val_acc'], label='Val')
-    plt.title('Accuracy Evaluation')
-    plt.legend()
-    
-    plt.subplot(1, 2, 2)
-    plt.plot(history['train_loss'], label='Train')
-    plt.plot(history['val_loss'], label='Val')
-    plt.title('Loss Curve')
-    plt.legend()
-    
+    plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
+    plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     plt.savefig(os.path.join(SAVE_DIR, "ferplus_training_plot.png"))
-    print("--> Process completed. Performance metrics mapped successfully.")
 
 if __name__ == "__main__":
     train_ferplus()
