@@ -31,12 +31,33 @@ class SupConLoss(nn.Module):
         loss = -mean_log_prob_pos.mean()
         return loss
 
+# UPDATED: Added WeightedFocalLoss to force the model to focus on hard-to-classify samples
+class WeightedFocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, label_smoothing=0.1):
+        super().__init__()
+        self.gamma = gamma
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits, targets, alpha_weights):
+        ce_loss = F.cross_entropy(
+            logits, 
+            targets, 
+            reduction='none', 
+            weight=alpha_weights, 
+            label_smoothing=self.label_smoothing
+        )
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        return focal_loss.mean()
+
 class CombinedFERLoss(nn.Module):
+    # UPDATED: Default alpha dropped to 0.1 to let the primary loss drive the learning
     def __init__(self, feat_dim, num_classes=7, alpha=0.1):
         super(CombinedFERLoss, self).__init__()
         self.feat_dim = feat_dim
         self.alpha = alpha
         self.supcon = SupConLoss(temperature=0.07)
+        self.focal = WeightedFocalLoss(gamma=2.0, label_smoothing=0.1) # UPDATED: label_smoothing down to 0.1
         
         weights = torch.tensor([
             0.2178, 1.0000, 0.3919, 0.0589, 0.1418, 0.3986, 0.1113
@@ -46,15 +67,15 @@ class CombinedFERLoss(nn.Module):
     def forward(self, logits, features, labels, aux_global=None, aux_local=None):
         target = labels - 1
         
-        # RESTORED TO 0.25 FOR FRESH TRAINING RUN
-        ce_loss = F.cross_entropy(logits, target, weight=self.class_weights, label_smoothing=0.25)
+        # UPDATED: Swapped standard Cross-Entropy for dynamic Focal Loss
+        main_loss = self.focal(logits, target, self.class_weights)
         supcon_loss = self.supcon(features, target)
         
-        total_loss = ce_loss + (self.alpha * supcon_loss)
+        total_loss = main_loss + (self.alpha * supcon_loss)
 
         if aux_global is not None and aux_local is not None:
-            loss_global = F.cross_entropy(aux_global, target, weight=self.class_weights, label_smoothing=0.25)
-            loss_local = F.cross_entropy(aux_local, target, weight=self.class_weights, label_smoothing=0.25)
+            loss_global = self.focal(aux_global, target, self.class_weights)
+            loss_local = self.focal(aux_local, target, self.class_weights)
             total_loss = total_loss + loss_global + loss_local
             
         return total_loss

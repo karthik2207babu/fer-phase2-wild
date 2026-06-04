@@ -37,8 +37,8 @@ def train():
 
     model = FRITNet(num_classes=7).to(device)
 
-    # Aggressive Regularization: alpha=0.5
-    criterion = CombinedFERLoss(feat_dim=128, alpha=0.5).to(device)
+    # UPDATED: Dropped alpha to 0.1 to reduce over-regularization
+    criterion = CombinedFERLoss(feat_dim=128, alpha=0.1).to(device)
 
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -58,7 +58,8 @@ def train():
     best_val_acc = 0.0
     epochs_without_improvement = 0
 
-    log_file_path = os.path.join(SAVE_DIR, "training_log_crossattn.txt")
+    # UPDATED: File name changed to prevent overwriting
+    log_file_path = os.path.join(SAVE_DIR, "training_log_focal_ms.txt")
     log_file = open(log_file_path, "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -107,8 +108,8 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            # UPDATED SAVE PATH TO AVOID OVERWRITING YOUR 86.9% SOTA
-            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_crossattn.pth")
+            # UPDATED: File name changed
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_focal_ms.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
@@ -128,8 +129,8 @@ def train():
     plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
     plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     
-    # UPDATED PLOT PATH
-    plot_path = os.path.join(SAVE_DIR, "training_results_plot_crossattn.png")
+    # UPDATED: File name changed
+    plot_path = os.path.join(SAVE_DIR, "training_results_plot_focal_ms.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
