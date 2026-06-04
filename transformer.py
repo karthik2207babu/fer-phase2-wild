@@ -8,7 +8,7 @@ class FRITTransformer(nn.Module):
         num_heads=8,      
         num_local_layers=2,  
         num_classes=7,
-        dropout=0.3       # UPDATED: Lowered dropout to 0.3 to reduce regularization penalty
+        dropout=0.5       # UPDATED: Reverted back to 0.5 to break training data memorization
     ):
         super(FRITTransformer, self).__init__()
 

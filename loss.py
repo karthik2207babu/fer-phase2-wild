@@ -33,7 +33,7 @@ class SupConLoss(nn.Module):
 
 # UPDATED: Added WeightedFocalLoss to force the model to focus on hard-to-classify samples
 class WeightedFocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, label_smoothing=0.1):
+    def __init__(self, gamma=2.0, label_smoothing=0.2):
         super().__init__()
         self.gamma = gamma
         self.label_smoothing = label_smoothing
@@ -52,7 +52,7 @@ class WeightedFocalLoss(nn.Module):
 
 class CombinedFERLoss(nn.Module):
     # UPDATED: Default alpha dropped to 0.1 to let the primary loss drive the learning
-    def __init__(self, feat_dim, num_classes=7, alpha=0.1):
+    def __init__(self, feat_dim, num_classes=7, alpha=0.3):
         super(CombinedFERLoss, self).__init__()
         self.feat_dim = feat_dim
         self.alpha = alpha

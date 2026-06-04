@@ -37,7 +37,6 @@ def train():
 
     model = FRITNet(num_classes=7).to(device)
 
-    # UPDATED: Dropped alpha to 0.1 to reduce over-regularization
     criterion = CombinedFERLoss(feat_dim=128, alpha=0.1).to(device)
 
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -45,12 +44,13 @@ def train():
     for param in model.backbone.parameters():
         param.requires_grad = True
 
+    # UPDATED: Raised weight_decay from 1e-4 to 1e-2 to enforce strict weight penalization
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
         {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
-    ], weight_decay=1e-4)
+    ], weight_decay=1e-2)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
@@ -58,8 +58,8 @@ def train():
     best_val_acc = 0.0
     epochs_without_improvement = 0
 
-    # UPDATED: File name changed to prevent overwriting
-    log_file_path = os.path.join(SAVE_DIR, "training_log_focal_ms.txt")
+    # UPDATED: Output name reflects the heavy weight regularization run
+    log_file_path = os.path.join(SAVE_DIR, "training_log_focal_reg.txt")
     log_file = open(log_file_path, "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -108,8 +108,8 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            # UPDATED: File name changed
-            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_focal_ms.pth")
+            # UPDATED: Output name changed
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_focal_reg.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
@@ -129,8 +129,8 @@ def train():
     plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
     plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     
-    # UPDATED: File name changed
-    plot_path = os.path.join(SAVE_DIR, "training_results_plot_focal_ms.png")
+    # UPDATED: Output name changed
+    plot_path = os.path.join(SAVE_DIR, "training_results_plot_focal_reg.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 

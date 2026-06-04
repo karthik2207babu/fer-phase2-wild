@@ -5,7 +5,6 @@ from backbone import TruncatedFaceNet
 from lfa import LFAModule
 from safm import SAFM
 from transformer import FRITTransformer
-from multiscale import MultiScaleGlobalConv # UPDATED: Imported the unused module
 
 class FRITNet(nn.Module):
     def __init__(self, num_classes=7):
@@ -18,23 +17,19 @@ class FRITNet(nn.Module):
         # 2. Spatial Noise Gate
         self.safm = SAFM(kernel_size=7)
         
-        # UPDATED: 3. Multi-Scale Context to catch micro and macro features
-        self.ms_conv = MultiScaleGlobalConv(in_channels=128) 
-        
-        # 4. Cross-Attention Relation Transformer
+        # 3. Cross-Attention Relation Transformer
         self.transformer = FRITTransformer(
             embed_dim=128, 
             num_heads=8,      
             num_local_layers=2,  
             num_classes=num_classes, 
-            dropout=0.3       # UPDATED: Dropout defaults to 0.3 here for consistency
+            dropout=0.5       
         )
 
     def forward(self, x):
         x = self.backbone(x)     
         x = self.lfa(x)          
         x = self.safm(x)         
-        x = self.ms_conv(x)      # UPDATED: Routed features through the Multi-Scale block
         
         logits, features, aux_global, aux_local = self.transformer(x) 
         
