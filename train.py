@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
+import numpy as np
 
 from dataset import RAFDBDataset
 from model import FRITNet
@@ -11,9 +12,9 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 50
+EPOCHS = 80             # UPDATED: Increased for MixUp convergence
 LEARNING_RATE = 1e-4
-EARLY_STOPPING_PATIENCE = 12
+EARLY_STOPPING_PATIENCE = 15 # UPDATED: Increased to allow for MixUp fluctuations
 
 # Colab Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -23,9 +24,24 @@ TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 SAVE_DIR = "/content/drive/MyDrive/FER_Phase3_Results"
 
+# UPDATED: MixUp function added
+def mixup_data(x, y, alpha=0.2, device='cuda'):
+    '''Returns mixed inputs, pairs of targets, and lambda'''
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(device)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Starting Cross-Attention training on: {device}")
+    print(f"Starting MixUp Cross-Attention training on: {device}")
 
     train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
@@ -44,13 +60,13 @@ def train():
     for param in model.backbone.parameters():
         param.requires_grad = True
 
-    # UPDATED: Raised weight_decay from 1e-4 to 1e-2 to enforce strict weight penalization
+    # UPDATED: Weight decay dialed into the middle ground (1e-3)
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
         {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
-    ], weight_decay=1e-2)
+    ], weight_decay=1e-3)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
@@ -58,8 +74,7 @@ def train():
     best_val_acc = 0.0
     epochs_without_improvement = 0
 
-    # UPDATED: Output name reflects the heavy weight regularization run
-    log_file_path = os.path.join(SAVE_DIR, "training_log_focal_reg.txt")
+    log_file_path = os.path.join(SAVE_DIR, "training_log_mixup.txt")
     log_file = open(log_file_path, "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -72,8 +87,15 @@ def train():
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
             
-            logits, features, aux_global, aux_local = model(images)
-            loss = criterion(logits, features, labels, aux_global, aux_local)
+            # UPDATED: Apply MixUp to the training batch
+            mixed_images, targets_a, targets_b, lam = mixup_data(images, labels, alpha=0.2, device=device)
+            
+            logits, features, aux_global, aux_local = model(mixed_images)
+            
+            # UPDATED: Calculate loss as a linear combination of both targets
+            loss_a = criterion(logits, features, targets_a, aux_global, aux_local)
+            loss_b = criterion(logits, features, targets_b, aux_global, aux_local)
+            loss = lam * loss_a + (1 - lam) * loss_b
             
             loss.backward()
             optimizer.step()
@@ -81,7 +103,11 @@ def train():
             train_loss += loss.item()
             _, predicted = torch.max(logits.data, 1)
             train_total += labels.size(0)
-            train_correct += (predicted == (labels - 1)).sum().item()
+            
+            # For accuracy tracking during MixUp, we count it as correct if it matches the dominant label
+            dominant_labels = targets_a if lam > 0.5 else targets_b
+            train_correct += (predicted == (dominant_labels - 1)).sum().item()
+            
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
         model.eval()
@@ -89,8 +115,11 @@ def train():
         with torch.no_grad():
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
+                
+                # Validation uses standard clean images, NO MixUp here
                 logits, features, aux_global, aux_local = model(images)
                 loss = criterion(logits, features, labels, aux_global, aux_local)
+                
                 val_loss += loss.item()
                 _, predicted = torch.max(logits.data, 1)
                 val_total += labels.size(0)
@@ -108,8 +137,7 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            # UPDATED: Output name changed
-            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_focal_reg.pth")
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_mixup.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
@@ -129,8 +157,7 @@ def train():
     plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
     plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     
-    # UPDATED: Output name changed
-    plot_path = os.path.join(SAVE_DIR, "training_results_plot_focal_reg.png")
+    plot_path = os.path.join(SAVE_DIR, "training_results_plot_mixup.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
