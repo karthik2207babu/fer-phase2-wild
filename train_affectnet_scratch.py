@@ -47,8 +47,8 @@ BASE_PATH = "/content/data/affectnet/affectnet"
 TRAIN_DIR = os.path.join(BASE_PATH, "Train")
 TEST_DIR = os.path.join(BASE_PATH, "Test")
 
-# Save directly to Drive
-SAVE_DIR = "/content/drive/MyDrive/AffectNet_FRIT_Results"
+# UPDATED: Unique directory for Phase 1 pre-training
+SAVE_DIR = "/content/drive/MyDrive/AffectNet_Phase1_Pretrain"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 emotion_map = {
@@ -170,13 +170,13 @@ def train():
     model = FRITNet(num_classes=NUM_CLASSES).to(DEVICE)
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
     
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
+    # UPDATED: Set weight decay to 1e-4 for the massive dataset
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     
-    # Create the master log file
-    log_file_path = os.path.join(SAVE_DIR, "affectnet_frit_master_log.txt")
+    log_file_path = os.path.join(SAVE_DIR, "affectnet_phase1_master_log.txt")
     with open(log_file_path, "w") as log_file:
         log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
     
@@ -198,9 +198,16 @@ def train():
             images, labels = images.to(DEVICE), labels.to(DEVICE)
 
             optimizer.zero_grad()
-            logits, features = model(images)
             
-            loss = criterion(logits, labels)
+            # UPDATED: Fixed unpacking crash (model.py returns 4 items)
+            logits, _, aux_global, aux_local = model(images)
+            
+            # UPDATED: Train all three transformer heads simultaneously 
+            loss_main = criterion(logits, labels)
+            loss_global = criterion(aux_global, labels)
+            loss_local = criterion(aux_local, labels)
+            loss = loss_main + loss_global + loss_local
+            
             loss.backward()
             optimizer.step()
 
@@ -223,8 +230,13 @@ def train():
             for images, labels in test_loader:
                 images, labels = images.to(DEVICE), labels.to(DEVICE)
 
-                logits, features = model(images)
-                loss = criterion(logits, labels)
+                # UPDATED: Fixed unpacking crash for validation
+                logits, _, aux_global, aux_local = model(images)
+                
+                loss_main = criterion(logits, labels)
+                loss_global = criterion(aux_global, labels)
+                loss_local = criterion(aux_local, labels)
+                loss = loss_main + loss_global + loss_local
 
                 val_loss += loss.item()
                 _, predicted = torch.max(logits.data, 1)
@@ -246,14 +258,14 @@ def train():
         log_text = f"Epoch {current_epoch} | T-Loss: {t_loss:.4f} | T-Acc: {t_acc:.4f} | V-Loss: {v_loss:.4f} | V-Acc: {v_acc:.4f}"
         print(log_text)
         
-        # Append to log file and flush immediately
         with open(log_file_path, "a") as log_file:
             log_file.write(f"{current_epoch},{t_loss:.4f},{t_acc:.4f},{v_loss:.4f},{v_acc:.4f}\n")
 
         # =========================================================
         # SAVE WEIGHTS FOR THIS SPECIFIC EPOCH
         # =========================================================
-        weight_filename = f"affectnet_weights_epoch_{current_epoch}.pth"
+        # UPDATED: Unique naming for Phase 1 weights
+        weight_filename = f"affectnet_phase1_epoch_{current_epoch}.pth"
         weight_path = os.path.join(SAVE_DIR, weight_filename)
         torch.save(model.state_dict(), weight_path)
         print(f"--> Saved Weights: {weight_filename}")
@@ -263,7 +275,6 @@ def train():
         # =========================================================
         plt.figure(figsize=(12, 5))
         
-        # Accuracy Subplot
         plt.subplot(1, 2, 1)
         plt.plot(history['train_acc'], label='Train Acc', marker='o')
         plt.plot(history['val_acc'], label='Val Acc', marker='o')
@@ -273,7 +284,6 @@ def train():
         plt.legend()
         plt.grid(True)
 
-        # Loss Subplot
         plt.subplot(1, 2, 2)
         plt.plot(history['train_loss'], label='Train Loss', marker='o')
         plt.plot(history['val_loss'], label='Val Loss', marker='o')
@@ -285,11 +295,10 @@ def train():
         
         plt.tight_layout()
         
-        plot_filename = f"affectnet_plot_epoch_{current_epoch}.png"
+        plot_filename = f"affectnet_phase1_plot_epoch_{current_epoch}.png"
         plot_path = os.path.join(SAVE_DIR, plot_filename)
         plt.savefig(plot_path)
         
-        # Close the plot to free up memory
         plt.close()
         print(f"--> Saved Plot: {plot_filename}")
 
