@@ -5,6 +5,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
 import pandas as pd
+import numpy as np
 from PIL import Image
 
 from dataset import RAFDBDataset
@@ -13,9 +14,9 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 40
-LEARNING_RATE = 5e-5 # Lower LR since we are fine-tuning from a strong baseline
-EARLY_STOPPING_PATIENCE = 12
+EPOCHS = 50           # Increased slightly to allow MixUp to converge
+LEARNING_RATE = 5e-5 
+EARLY_STOPPING_PATIENCE = 15
 
 # Colab Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -27,7 +28,19 @@ VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 # Pseudo-Label Paths
 PSEUDO_CSV = "/content/drive/MyDrive/pseudo_labeled_affectnet.csv"
 PRETRAINED_WEIGHTS = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_mixup.pth"
-SAVE_DIR = "/content/drive/MyDrive/FER_Phase4_Pseudo"
+SAVE_DIR = "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUp"
+
+# --- MixUp Function ---
+def mixup_data(x, y, alpha=0.2, device='cuda'):
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(device)
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
 
 # --- Dedicated Loader for the Pseudo-Labeled Data ---
 class PseudoLabelDataset(Dataset):
@@ -50,26 +63,19 @@ class PseudoLabelDataset(Dataset):
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Starting Pseudo-Label Combined Training on: {device}")
+    print(f"Starting Pseudo-Label + MixUp Training on: {device}")
     
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # 1. Load Original RAF-DB Train Dataset
     raf_train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
-    
-    # 2. Load Pseudo-Labeled Dataset (re-using the exact same augmentations)
     pseudo_dataset = PseudoLabelDataset(csv_file=PSEUDO_CSV, transform=raf_train_dataset.transform)
-    
-    # 3. Combine them
     combined_train_dataset = ConcatDataset([raf_train_dataset, pseudo_dataset])
-    
-    # Validation remains strictly RAF-DB to track our true target metric
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
 
     train_loader = DataLoader(combined_train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
-    print(f"Ready! Training on {len(combined_train_dataset)} Total Images ({len(raf_train_dataset)} RAF + {len(pseudo_dataset)} Pseudo).")
+    print(f"Ready! Training on {len(combined_train_dataset)} Total Images.")
 
     model = FRITNet(num_classes=7).to(device)
 
@@ -77,10 +83,10 @@ def train():
         print(f"Loading Base Weights: {PRETRAINED_WEIGHTS}")
         model.load_state_dict(torch.load(PRETRAINED_WEIGHTS, map_location=device))
     else:
-        print("WARNING: Base weights not found. Training from scratch.")
+        print("WARNING: Base weights not found.")
 
-    # Restoring standard SupCon configuration
-    criterion = CombinedFERLoss(feat_dim=128, alpha=0.1).to(device)
+    # alpha=0.0 to disable SupCon during MixUp
+    criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
 
     for param in model.backbone.parameters():
         param.requires_grad = True
@@ -90,7 +96,7 @@ def train():
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
         {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
-    ], weight_decay=1e-4)
+    ], weight_decay=1e-3)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
@@ -98,7 +104,7 @@ def train():
     best_val_acc = 0.0
     epochs_without_improvement = 0
 
-    log_file_path = os.path.join(SAVE_DIR, "training_log_pseudo.txt")
+    log_file_path = os.path.join(SAVE_DIR, "training_log_pseudo_mixup.txt")
     log_file = open(log_file_path, "w")
     log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -111,8 +117,14 @@ def train():
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
             
-            logits, features, aux_global, aux_local = model(images)
-            loss = criterion(logits, features, labels, aux_global, aux_local)
+            # Apply MixUp
+            mixed_images, targets_a, targets_b, lam = mixup_data(images, labels, alpha=0.2, device=device)
+            
+            logits, features, aux_global, aux_local = model(mixed_images)
+            
+            loss_a = criterion(logits, features, targets_a, aux_global, aux_local)
+            loss_b = criterion(logits, features, targets_b, aux_global, aux_local)
+            loss = lam * loss_a + (1 - lam) * loss_b
             
             loss.backward()
             optimizer.step()
@@ -120,7 +132,10 @@ def train():
             train_loss += loss.item()
             _, predicted = torch.max(logits.data, 1)
             train_total += labels.size(0)
-            train_correct += (predicted == (labels - 1)).sum().item()
+            
+            dominant_labels = targets_a if lam > 0.5 else targets_b
+            train_correct += (predicted == (dominant_labels - 1)).sum().item()
+            
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
         model.eval()
@@ -147,7 +162,7 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_pseudo.pth")
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_pseudo_mixup.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
@@ -167,7 +182,7 @@ def train():
     plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
     plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     
-    plot_path = os.path.join(SAVE_DIR, "training_results_plot_pseudo.png")
+    plot_path = os.path.join(SAVE_DIR, "training_results_plot_pseudo_mixup.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
