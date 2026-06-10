@@ -17,7 +17,9 @@ CONFIDENCE_THRESHOLD = 0.95
 ZIP_PATH = "/content/drive/MyDrive/affectnet.zip"
 EXTRACT_PATH = "/content/data"
 AFFECTNET_DIR = os.path.join(EXTRACT_PATH, "affectnet/affectnet/Train") 
-RAF_WEIGHTS = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_focal_ms.pth" 
+
+# UPDATED: Pointing to the MixUp weights that match the current model.py architecture
+RAF_WEIGHTS = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_mixup.pth" 
 OUTPUT_CSV = "/content/drive/MyDrive/pseudo_labeled_affectnet.csv"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
