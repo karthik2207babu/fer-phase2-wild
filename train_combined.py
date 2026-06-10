@@ -14,7 +14,7 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 50           # Increased slightly to allow MixUp to converge
+EPOCHS = 50           
 LEARNING_RATE = 5e-5 
 EARLY_STOPPING_PATIENCE = 15
 
@@ -28,7 +28,9 @@ VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 # Pseudo-Label Paths
 PSEUDO_CSV = "/content/drive/MyDrive/pseudo_labeled_affectnet.csv"
 PRETRAINED_WEIGHTS = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_mixup.pth"
-SAVE_DIR = "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUp"
+
+# UPDATED: Dedicated save directory for the Decay run
+SAVE_DIR = "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUpDecay"
 
 # --- MixUp Function ---
 def mixup_data(x, y, alpha=0.2, device='cuda'):
@@ -63,7 +65,7 @@ class PseudoLabelDataset(Dataset):
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Starting Pseudo-Label + MixUp Training on: {device}")
+    print(f"Starting Pseudo-Label + MixUp Decay Training on: {device}")
     
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -85,7 +87,7 @@ def train():
     else:
         print("WARNING: Base weights not found.")
 
-    # alpha=0.0 to disable SupCon during MixUp
+    # alpha=0.0 to disable SupCon during the MixUp phases
     criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
 
     for param in model.backbone.parameters():
@@ -104,27 +106,39 @@ def train():
     best_val_acc = 0.0
     epochs_without_improvement = 0
 
-    log_file_path = os.path.join(SAVE_DIR, "training_log_pseudo_mixup.txt")
+    log_file_path = os.path.join(SAVE_DIR, "training_log_decay.txt")
     log_file = open(log_file_path, "w")
-    log_file.write("Epoch,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
+    log_file.write("Epoch,MixUp_Prob,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
     for epoch in range(EPOCHS):
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+        
+        # UPDATED: MixUp Decay Logic
+        # Starts at 1.0, drops by 0.1 every 5 epochs
+        mixup_prob = max(0.0, 1.0 - (epoch // 5) * 0.1)
+        
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [MixUp: {mixup_prob:.1f}]")
 
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
             
-            # Apply MixUp
-            mixed_images, targets_a, targets_b, lam = mixup_data(images, labels, alpha=0.2, device=device)
-            
-            logits, features, aux_global, aux_local = model(mixed_images)
-            
-            loss_a = criterion(logits, features, targets_a, aux_global, aux_local)
-            loss_b = criterion(logits, features, targets_b, aux_global, aux_local)
-            loss = lam * loss_a + (1 - lam) * loss_b
+            # Conditionally apply MixUp based on current probability
+            if np.random.rand() < mixup_prob:
+                mixed_images, targets_a, targets_b, lam = mixup_data(images, labels, alpha=0.2, device=device)
+                logits, features, aux_global, aux_local = model(mixed_images)
+                
+                loss_a = criterion(logits, features, targets_a, aux_global, aux_local)
+                loss_b = criterion(logits, features, targets_b, aux_global, aux_local)
+                loss = lam * loss_a + (1 - lam) * loss_b
+                
+                dominant_labels = targets_a if lam > 0.5 else targets_b
+            else:
+                # Standard training on clean images
+                logits, features, aux_global, aux_local = model(images)
+                loss = criterion(logits, features, labels, aux_global, aux_local)
+                dominant_labels = labels
             
             loss.backward()
             optimizer.step()
@@ -133,7 +147,7 @@ def train():
             _, predicted = torch.max(logits.data, 1)
             train_total += labels.size(0)
             
-            dominant_labels = targets_a if lam > 0.5 else targets_b
+            # Track correct predictions matching the dominant label (RAF-DB labels are 1-indexed)
             train_correct += (predicted == (dominant_labels - 1)).sum().item()
             
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
@@ -153,16 +167,16 @@ def train():
         t_acc, v_acc = train_correct/train_total, val_correct/val_total
         t_loss, v_loss = train_loss/len(train_loader), val_loss/len(val_loader)
         
-        print(f"Epoch {epoch+1}: T-Acc: {t_acc:.4f}, V-Acc: {v_acc:.4f}")
+        print(f"Epoch {epoch+1} (MixUp: {mixup_prob:.1f}): T-Acc: {t_acc:.4f}, V-Acc: {v_acc:.4f}")
         history['train_loss'].append(t_loss); history['val_loss'].append(v_loss)
         history['train_acc'].append(t_acc); history['val_acc'].append(v_acc)
         
-        log_file.write(f"{epoch+1},{t_loss:.4f},{t_acc:.4f},{v_loss:.4f},{v_acc:.4f}\n")
+        log_file.write(f"{epoch+1},{mixup_prob:.1f},{t_loss:.4f},{t_acc:.4f},{v_loss:.4f},{v_acc:.4f}\n")
         log_file.flush()
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_pseudo_mixup.pth")
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_decay.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
@@ -182,7 +196,7 @@ def train():
     plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
     plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     
-    plot_path = os.path.join(SAVE_DIR, "training_results_plot_pseudo_mixup.png")
+    plot_path = os.path.join(SAVE_DIR, "training_results_plot_decay.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
