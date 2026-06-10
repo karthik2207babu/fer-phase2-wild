@@ -11,7 +11,7 @@ from loss_ferplus import FERPlusMRANLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 60                 # Increased to 60 for MixUp convergence
+EPOCHS = 60                # Increased to 60 for MixUp convergence
 LEARNING_RATE = 1e-4
 EARLY_STOPPING_PATIENCE = 15 # Increased to handle MixUp noise
 SAVE_DIR = "/content/drive/MyDrive/FERPlus_Results"
