@@ -11,7 +11,7 @@ from model import FRITNet
 
 # --- Configuration ---
 BATCH_SIZE = 64
-CONFIDENCE_THRESHOLD = 0.95
+CONFIDENCE_THRESHOLD = 0.75
 
 # Paths
 ZIP_PATH = "/content/drive/MyDrive/affectnet.zip"
