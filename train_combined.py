@@ -25,11 +25,14 @@ VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
 TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
-# Pseudo-Label Paths
+# Pseudo-Label & Zip Paths
+ZIP_PATH = "/content/drive/MyDrive/affectnet.zip"
+EXTRACT_PATH = "/content/data"
+AFFECTNET_DIR = os.path.join(EXTRACT_PATH, "affectnet/affectnet/Train") 
 PSEUDO_CSV = "/content/drive/MyDrive/pseudo_labeled_affectnet.csv"
-PRETRAINED_WEIGHTS = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_mixup.pth"
 
-# UPDATED: Dedicated save directory for the Decay run
+# Weights & Save Paths
+PRETRAINED_WEIGHTS = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_mixup.pth"
 SAVE_DIR = "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUpDecay"
 
 # --- MixUp Function ---
@@ -69,6 +72,17 @@ def train():
     
     os.makedirs(SAVE_DIR, exist_ok=True)
 
+    # =========================================================
+    # ZIP EXTRACTION (Added for new VM sessions)
+    # =========================================================
+    if not os.path.exists(AFFECTNET_DIR):
+        os.makedirs(EXTRACT_PATH, exist_ok=True)
+        print(f"\nExtracting AffectNet ZIP from {ZIP_PATH}...")
+        os.system(f'unzip -q -n "{ZIP_PATH}" -d "{EXTRACT_PATH}"')
+        print("Extraction Complete\n")
+    else:
+        print("\nAffectNet Dataset already extracted.\n")
+
     raf_train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     pseudo_dataset = PseudoLabelDataset(csv_file=PSEUDO_CSV, transform=raf_train_dataset.transform)
     combined_train_dataset = ConcatDataset([raf_train_dataset, pseudo_dataset])
@@ -85,7 +99,7 @@ def train():
         print(f"Loading Base Weights: {PRETRAINED_WEIGHTS}")
         model.load_state_dict(torch.load(PRETRAINED_WEIGHTS, map_location=device))
     else:
-        print("WARNING: Base weights not found.")
+        print("WARNING: Base weights not found. Check shortcut paths!")
 
     # alpha=0.0 to disable SupCon during the MixUp phases
     criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
@@ -114,8 +128,7 @@ def train():
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
         
-        # UPDATED: MixUp Decay Logic
-        # Starts at 1.0, drops by 0.1 every 5 epochs
+        # MixUp Decay Logic: Starts at 1.0, drops by 0.1 every 5 epochs
         mixup_prob = max(0.0, 1.0 - (epoch // 5) * 0.1)
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [MixUp: {mixup_prob:.1f}]")
@@ -147,7 +160,6 @@ def train():
             _, predicted = torch.max(logits.data, 1)
             train_total += labels.size(0)
             
-            # Track correct predictions matching the dominant label (RAF-DB labels are 1-indexed)
             train_correct += (predicted == (dominant_labels - 1)).sum().item()
             
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
