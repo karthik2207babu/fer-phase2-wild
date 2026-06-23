@@ -14,10 +14,11 @@ VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
 # Test both weight files to see which one scales higher with TTA
-WEIGHTS_TO_CHECK = [
-    "/content/drive/MyDrive/FER_Phase4_Pseudo/best_frit_weights_pseudo.pth",      # The 87.03% run
-    "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUpDecay/best_frit_weights_decay.pth" # The 86.96% run
-]
+# WEIGHTS_TO_CHECK = [
+#     "/content/drive/MyDrive/FER_Phase4_Pseudo/best_frit_weights_pseudo.pth",      # The 87.03% run
+#     "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUpDecay/best_frit_weights_decay.pth" # The 86.96% run
+# ]
+WEIGHTS_PATH = "/content/drive/MyDrive/FER_Phase5_Deep_Transformer/best_frit_weights_deep.pth"
 
 def evaluate_with_tta():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
