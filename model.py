@@ -7,7 +7,7 @@ from safm import SAFM
 from transformer import FRITTransformer
 
 class FRITNet(nn.Module):
-    def __init__(self, num_classes=7):
+    def __init__(self, num_classes=7, transformer_depth=6):
         super(FRITNet, self).__init__()
         
         # 1. Feature Extraction & Spatial Upscaling
@@ -21,7 +21,7 @@ class FRITNet(nn.Module):
         self.transformer = FRITTransformer(
             embed_dim=128, 
             num_heads=8,      
-            num_local_layers=2,  
+            num_local_layers=transformer_depth,  
             num_classes=num_classes, 
             dropout=0.5       
         )
@@ -36,7 +36,7 @@ class FRITNet(nn.Module):
         return logits, features, aux_global, aux_local
 
 if __name__ == "__main__":
-    model = FRITNet()
+    model = FRITNet(transformer_depth=6)
     dummy_input = torch.randn(2, 3, 224, 224)
     logits, features, aux_global, aux_local = model(dummy_input)
     print(f"Logits shape: {logits.shape}")
