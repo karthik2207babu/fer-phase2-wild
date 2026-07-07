@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn # Added for the classification head swap
 import torch.optim as optim
 from torch.utils.data import DataLoader, ConcatDataset, Dataset
 from tqdm import tqdm
@@ -93,26 +94,68 @@ def train():
 
     print(f"Ready! Training on {len(combined_train_dataset)} Total Images.")
 
-    model = FRITNet(num_classes=7).to(device)
+    # =========================================================
+    # --- OLD CODE (COMMENTED OUT) ---
+    # =========================================================
+    # model = FRITNet(num_classes=7).to(device)
 
-    if os.path.exists(PRETRAINED_WEIGHTS):
-        print(f"Loading Base Weights: {PRETRAINED_WEIGHTS}")
-        model.load_state_dict(torch.load(PRETRAINED_WEIGHTS, map_location=device))
+    # if os.path.exists(PRETRAINED_WEIGHTS):
+    #     print(f"Loading Base Weights: {PRETRAINED_WEIGHTS}")
+    #     model.load_state_dict(torch.load(PRETRAINED_WEIGHTS, map_location=device))
+    # else:
+    #     print("WARNING: Base weights not found. Check shortcut paths!")
+
+    # # alpha=0.0 to disable SupCon during the MixUp phases
+    # criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
+
+    # for param in model.backbone.parameters():
+    #     param.requires_grad = True
+
+    # optimizer = optim.AdamW([
+    #     {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
+    #     {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
+    #     {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
+    #     {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
+    # ], weight_decay=1e-3)
+
+    # =========================================================
+    # --- NEW CODE: FERPLUS TO RAF-DB BRIDGE ---
+    # =========================================================
+    # UPDATE THIS PATH if your FERPlus weights are saved under a different folder
+    FERPLUS_WEIGHTS = "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUpDecay/best_ferplus_sgd_0.01.pth" 
+    
+    # 1. Initialize as 8-classes so the FERPlus state_dict maps perfectly
+    model = FRITNet(num_classes=8).to(device)
+
+    if os.path.exists(FERPLUS_WEIGHTS):
+        print(f"--> Loading stabilized FERPlus Base Weights: {FERPLUS_WEIGHTS}")
+        model.load_state_dict(torch.load(FERPLUS_WEIGHTS, map_location=device))
     else:
-        print("WARNING: Base weights not found. Check shortcut paths!")
+        print(f"--> WARNING: FERPlus weights not found at {FERPLUS_WEIGHTS}! Check your Colab paths.")
 
-    # alpha=0.0 to disable SupCon during the MixUp phases
+    # 2. Surgical Head Swap: Overwrite the 8-class layers with fresh 7-class layers
+    print("--> Reinitializing classification heads for 7 classes (RAF-DB)...")
+    embed_dim = 128
+    
+    model.transformer.head[2] = nn.Linear(embed_dim, 7).to(device)
+    model.transformer.aux_global_head = nn.Linear(embed_dim, 7).to(device)
+    model.transformer.aux_local_head = nn.Linear(embed_dim, 7).to(device)
+    
+    # 3. Initialize Loss (alpha=0.0 disables SupCon during MixUp)
     criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
 
+    # Ensure backbone requires gradients for fine-tuning
     for param in model.backbone.parameters():
         param.requires_grad = True
 
+    # 4. Pass to AdamW Differential Optimizer
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
         {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
     ], weight_decay=1e-3)
+    # =========================================================
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
