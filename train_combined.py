@@ -124,8 +124,9 @@ def train():
     # UPDATE THIS PATH if your FERPlus weights are saved under a different folder
     FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_sgd_0.01.pth" 
     
-    # 1. Initialize as 8-classes so the FERPlus state_dict maps perfectly
-    model = FRITNet(num_classes=8).to(device)
+
+    # 1. Initialize as 8-classes with depth 2 so the FERPlus state_dict maps perfectly
+    model = FRITNet(num_classes=8, transformer_depth=2).to(device)
 
     if os.path.exists(FERPLUS_WEIGHTS):
         print(f"--> Loading stabilized FERPlus Base Weights: {FERPLUS_WEIGHTS}")
