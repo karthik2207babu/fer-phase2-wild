@@ -71,7 +71,7 @@ def generate_pseudo_labels():
     
     print(f"Found {len(dataset)} unlabeled images to process.")
 
-    model = FRITNet(num_classes=7).to(device)
+    model = FRITNet(num_classes=7, transformer_depth=2).to(device)
     model.load_state_dict(torch.load(RAF_WEIGHTS, map_location=device))
     model.eval()
 
