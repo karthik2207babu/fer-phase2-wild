@@ -122,7 +122,7 @@ def train():
     # --- NEW CODE: FERPLUS TO RAF-DB BRIDGE ---
     # =========================================================
     # UPDATE THIS PATH if your FERPlus weights are saved under a different folder
-    FERPLUS_WEIGHTS = "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUpDecay/best_ferplus_sgd_0.01.pth" 
+    FERPLUS_WEIGHTS = "/content/drive/MyDrive/best_ferplus_sgd_0.01.pth" 
     
     # 1. Initialize as 8-classes so the FERPlus state_dict maps perfectly
     model = FRITNet(num_classes=8).to(device)
