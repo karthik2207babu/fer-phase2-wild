@@ -34,7 +34,7 @@ PSEUDO_CSV = "/content/drive/MyDrive/pseudo_labeled_affectnet.csv"
 
 # Weights & Save Paths
 PRETRAINED_WEIGHTS = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_mixup.pth"
-SAVE_DIR = "/content/drive/MyDrive/FER_Phase4_Pseudo_MixUpDecay"
+SAVE_DIR = "/content/drive/MyDrive/raf_trained_on_ferplus_weights"
 
 # --- MixUp Function ---
 def mixup_data(x, y, alpha=0.2, device='cuda'):
