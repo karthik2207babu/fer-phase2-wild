@@ -104,7 +104,7 @@ def train():
 
     if os.path.exists(FERPLUS_WEIGHTS):
         print(f"--> Loading stabilized FERPlus Base Weights: {FERPLUS_WEIGHTS}")
-        model.load_state_dict(torch.load(FERPLUS_WEIGHTS, map_location=device))
+        model.load_state_dict(torch.load(FERPLUS_WEIGHTS, map_location=device), strict=False)
     else:
         print(f"--> WARNING: FERPlus weights not found at {FERPLUS_WEIGHTS}! Check your Colab paths.")
 
