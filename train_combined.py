@@ -15,7 +15,7 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 50           
+EPOCHS = 80           # UPDATED: Increased to 80 to allow for longer clean tuning
 LEARNING_RATE = 5e-5 
 EARLY_STOPPING_PATIENCE = 15
 
@@ -74,7 +74,7 @@ def train():
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     # =========================================================
-    # ZIP EXTRACTION (Added for new VM sessions)
+    # ZIP EXTRACTION
     # =========================================================
     if not os.path.exists(AFFECTNET_DIR):
         os.makedirs(EXTRACT_PATH, exist_ok=True)
@@ -95,20 +95,18 @@ def train():
     print(f"Ready! Training on {len(combined_train_dataset)} Total Images.")
 
     # =========================================================
-    # --- NEW CODE: FERPLUS TO RAF-DB BRIDGE ---
+    # --- FERPLUS TO RAF-DB BRIDGE ---
     # =========================================================
     FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_sgd_0.01.pth" 
     
-    # 1. Initialize as 8-classes with depth 2 so the FERPlus state_dict maps perfectly
     model = FRITNet(num_classes=8, transformer_depth=2).to(device)
 
     if os.path.exists(FERPLUS_WEIGHTS):
         print(f"--> Loading stabilized FERPlus Base Weights: {FERPLUS_WEIGHTS}")
         model.load_state_dict(torch.load(FERPLUS_WEIGHTS, map_location=device), strict=False)
     else:
-        print(f"--> WARNING: FERPlus weights not found at {FERPLUS_WEIGHTS}! Check your Colab paths.")
+        print(f"--> WARNING: FERPlus weights not found at {FERPLUS_WEIGHTS}!")
 
-    # 2. Surgical Head Swap: Overwrite the 8-class layers with fresh 7-class layers
     print("--> Reinitializing classification heads for 7 classes (RAF-DB)...")
     embed_dim = 128
     
@@ -116,15 +114,11 @@ def train():
     model.transformer.aux_global_head = nn.Linear(embed_dim, 7).to(device)
     model.transformer.aux_local_head = nn.Linear(embed_dim, 7).to(device)
     
-    # 3. Initialize Loss (alpha=0.0 disables SupCon during MixUp)
     criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
 
-    # Ensure backbone requires gradients for fine-tuning
     for param in model.backbone.parameters():
         param.requires_grad = True
 
-    # 4. Pass to AdamW Differential Optimizer
-    # UPDATED: Isolating new classification heads from mature network weights
     base_transformer_params = [p for n, p in model.transformer.named_parameters() if 'head' not in n]
     head_params = [p for n, p in model.transformer.named_parameters() if 'head' in n]
 
@@ -135,7 +129,6 @@ def train():
         {'params': base_transformer_params, 'lr': LEARNING_RATE * 0.1},
         {'params': head_params, 'lr': LEARNING_RATE}
     ], weight_decay=1e-3)
-    # =========================================================
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
@@ -151,11 +144,11 @@ def train():
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
         
-        # UPDATED: MixUp Warmup (Epochs 0-4 are clean, starts at 1.0 at Epoch 5, drops by 0.1)
-        if epoch < 5:
+        # UPDATED: Extended Warmup to 15 Epochs, Max MixUp capped at 0.5
+        if epoch < 15:
             mixup_prob = 0.0
         else:
-            mixup_prob = max(0.0, 1.0 - ((epoch - 5) // 5) * 0.1)
+            mixup_prob = max(0.0, 0.5 - ((epoch - 15) // 5) * 0.1)
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [MixUp: {mixup_prob:.1f}]")
 
@@ -163,7 +156,6 @@ def train():
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
             
-            # Conditionally apply MixUp based on current probability
             if np.random.rand() < mixup_prob:
                 mixed_images, targets_a, targets_b, lam = mixup_data(images, labels, alpha=0.2, device=device)
                 logits, features, aux_global, aux_local = model(mixed_images)
@@ -174,7 +166,6 @@ def train():
                 
                 dominant_labels = targets_a if lam > 0.5 else targets_b
             else:
-                # Standard training on clean images
                 logits, features, aux_global, aux_local = model(images)
                 loss = criterion(logits, features, labels, aux_global, aux_local)
                 dominant_labels = labels
@@ -214,7 +205,7 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            weights_path = os.path.join(SAVE_DIR, "best_frit_weigths_pretrained_ferplus.pth")
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_decay.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
