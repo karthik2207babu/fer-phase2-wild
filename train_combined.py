@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn # Added for the classification head swap
+import torch.nn as nn 
 import torch.optim as optim
 from torch.utils.data import DataLoader, ConcatDataset, Dataset
 from tqdm import tqdm
@@ -95,36 +95,10 @@ def train():
     print(f"Ready! Training on {len(combined_train_dataset)} Total Images.")
 
     # =========================================================
-    # --- OLD CODE (COMMENTED OUT) ---
-    # =========================================================
-    # model = FRITNet(num_classes=7).to(device)
-
-    # if os.path.exists(PRETRAINED_WEIGHTS):
-    #     print(f"Loading Base Weights: {PRETRAINED_WEIGHTS}")
-    #     model.load_state_dict(torch.load(PRETRAINED_WEIGHTS, map_location=device))
-    # else:
-    #     print("WARNING: Base weights not found. Check shortcut paths!")
-
-    # # alpha=0.0 to disable SupCon during the MixUp phases
-    # criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
-
-    # for param in model.backbone.parameters():
-    #     param.requires_grad = True
-
-    # optimizer = optim.AdamW([
-    #     {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
-    #     {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
-    #     {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
-    #     {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
-    # ], weight_decay=1e-3)
-
-    # =========================================================
     # --- NEW CODE: FERPLUS TO RAF-DB BRIDGE ---
     # =========================================================
-    # UPDATE THIS PATH if your FERPlus weights are saved under a different folder
     FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_sgd_0.01.pth" 
     
-
     # 1. Initialize as 8-classes with depth 2 so the FERPlus state_dict maps perfectly
     model = FRITNet(num_classes=8, transformer_depth=2).to(device)
 
@@ -150,11 +124,16 @@ def train():
         param.requires_grad = True
 
     # 4. Pass to AdamW Differential Optimizer
+    # UPDATED: Isolating new classification heads from mature network weights
+    base_transformer_params = [p for n, p in model.transformer.named_parameters() if 'head' not in n]
+    head_params = [p for n, p in model.transformer.named_parameters() if 'head' in n]
+
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
-        {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
-        {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
-        {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
+        {'params': model.lfa.parameters(), 'lr': LEARNING_RATE * 0.1},
+        {'params': model.safm.parameters(), 'lr': LEARNING_RATE * 0.1},
+        {'params': base_transformer_params, 'lr': LEARNING_RATE * 0.1},
+        {'params': head_params, 'lr': LEARNING_RATE}
     ], weight_decay=1e-3)
     # =========================================================
 
@@ -172,8 +151,11 @@ def train():
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
         
-        # MixUp Decay Logic: Starts at 1.0, drops by 0.1 every 5 epochs
-        mixup_prob = max(0.0, 1.0 - (epoch // 5) * 0.1)
+        # UPDATED: MixUp Warmup (Epochs 0-4 are clean, starts at 1.0 at Epoch 5, drops by 0.1)
+        if epoch < 5:
+            mixup_prob = 0.0
+        else:
+            mixup_prob = max(0.0, 1.0 - ((epoch - 5) // 5) * 0.1)
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [MixUp: {mixup_prob:.1f}]")
 
@@ -232,7 +214,7 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_decay.pth")
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weigths_pretrained_ferplus.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0

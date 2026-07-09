@@ -8,10 +8,11 @@ class FRITTransformer(nn.Module):
         num_heads=8,      
         num_local_layers=2,  
         num_classes=7,
-        dropout=0.5       # UPDATED: Reverted back to 0.5 to break training data memorization
+        dropout=0.5       
     ):
         super(FRITTransformer, self).__init__()
 
+        # Restored to 9 patches (12x12 window, stride 8)
         self.num_patches = 9
         self.pos_drop = nn.Dropout(p=dropout)
         
@@ -28,8 +29,6 @@ class FRITTransformer(nn.Module):
         # ==========================================
         # 2. GLOBAL-LOCAL FUSION (Cross-Attention)
         # ==========================================
-        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
-        
         # Native PyTorch Cross-Attention
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -58,11 +57,13 @@ class FRITTransformer(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
 
-        # --- A. GLOBAL FEATURE EXTRACTION ---
+        # --- A. TRUE GLOBAL TOKEN EXTRACTION (MRAN: x^G) ---
         global_feat = x.mean(dim=[2, 3]) 
+        global_token = global_feat.unsqueeze(1) # Shape: (B, 1, 128) - Token #1
         aux_global_logits = self.aux_global_head(global_feat)
 
-        # --- B. PATCH EXTRACTION (28x28 map -> 9 patches) ---
+        # --- B. OVERLAPPING PATCH EXTRACTION (9 Tokens) ---
+        # Window: 12x12, Stride: 8
         patch_size = 12
         stride = 8
         regions = []
@@ -72,34 +73,32 @@ class FRITTransformer(nn.Module):
                 patch = x[:, :, h_start:h_start+patch_size, w_start:w_start+patch_size]
                 regions.append(patch.mean(dim=[2, 3]))
         
-        regional_tokens = torch.stack(regions, dim=1) 
+        regional_tokens = torch.stack(regions, dim=1) # Shape: (B, 9, 128) - Tokens #2-10
 
-        # --- C. LOCAL RELATION (Self-Attention on Patches) ---
+        # --- C. REGION RELATION TRANSFORMER (Local-Local Self Attention) ---
         T_local = self.pos_drop(regional_tokens + self.local_pos_embed)
         T_local_out = self.local_transformer(T_local) # Shape: (B, 9, 128)
         
         local_feat = T_local_out.mean(dim=1)
         aux_local_logits = self.aux_local_head(local_feat)
 
-        # --- D. GLOBAL-LOCAL FUSION (Cross-Attention) ---
-        # Query (Q) = Global CLS Token
-        # Keys (K) & Values (V) = Local Patch Tokens
+        # --- D. GLOBAL-LOCAL RELATION TRANSFORMER (MRAN Cross-Attention) ---
+        # Combine 1 Global Token + 9 Local Tokens = 10 Tokens total
+        kv_tokens = torch.cat([global_token, T_local_out], dim=1) # Shape: (B, 10, 128)
         
-        cls_tokens = self.cls_token.expand(B, -1, -1) # Shape: (B, 1, 128)
-        
-        # Q=cls_tokens, K=T_local_out, V=T_local_out
-        attn_out, _ = self.cross_attn(query=cls_tokens, key=T_local_out, value=T_local_out)
+        # Query (Q) = Global Token
+        # Keys (K) & Values (V) = All 10 Tokens
+        attn_out, _ = self.cross_attn(query=global_token, key=kv_tokens, value=kv_tokens)
         
         # Add & Norm
-        cls_tokens = self.norm1(cls_tokens + attn_out)
+        global_token = self.norm1(global_token + attn_out)
         
         # Feed-Forward & Norm
-        ffn_out = self.ffn(cls_tokens)
-        cls_tokens = self.norm2(cls_tokens + ffn_out) # Shape: (B, 1, 128)
+        ffn_out = self.ffn(global_token)
+        global_token = self.norm2(global_token + ffn_out) # Shape: (B, 1, 128)
         
         # --- E. FINAL PREDICTION ---
-        # Squeeze out the sequence dimension (B, 1, 128) -> (B, 128)
-        cls_out = cls_tokens.squeeze(1) 
+        cls_out = global_token.squeeze(1) 
         logits = self.head(cls_out)
 
         return logits, cls_out, aux_global_logits, aux_local_logits
