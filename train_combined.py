@@ -97,18 +97,15 @@ def train():
     # --- TRUE MRAN ARCHITECTURE: TRAINING FROM SCRATCH ---
     # =========================================================
     
-    # Initialize directly for 7 classes
     model = FRITNet(num_classes=7, transformer_depth=2).to(device)
     print("--> Initialized fresh 10-token FRITNet architecture for RAF-DB (7 classes).")
 
-    # Initialize Loss (alpha=0.0 disables SupCon during MixUp)
-    criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
+    # Initialize Loss with alpha 0.2 (will be dynamically toggled)
+    criterion = CombinedFERLoss(feat_dim=128, alpha=0.2).to(device)
 
-    # Ensure backbone requires gradients
     for param in model.backbone.parameters():
         param.requires_grad = True
 
-    # Unified Optimizer: Full LR for the custom modules, lower LR for the VGGFace2 backbone
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
@@ -131,7 +128,6 @@ def train():
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
         
-        # Extended Warmup to 15 Epochs, Max MixUp capped at 0.5
         if epoch < 15:
             mixup_prob = 0.0
         else:
@@ -144,6 +140,9 @@ def train():
             optimizer.zero_grad()
             
             if np.random.rand() < mixup_prob:
+                # DYNAMIC ROUTING: Disable SupCon for MixUp batches
+                criterion.alpha = 0.0
+                
                 mixed_images, targets_a, targets_b, lam = mixup_data(images, labels, alpha=0.2, device=device)
                 logits, features, aux_global, aux_local = model(mixed_images)
                 
@@ -153,6 +152,9 @@ def train():
                 
                 dominant_labels = targets_a if lam > 0.5 else targets_b
             else:
+                # DYNAMIC ROUTING: Enable SupCon (0.2) for clean batches to stabilize FaceNet
+                criterion.alpha = 0.2
+                
                 logits, features, aux_global, aux_local = model(images)
                 loss = criterion(logits, features, labels, aux_global, aux_local)
                 dominant_labels = labels
@@ -170,6 +172,10 @@ def train():
 
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
+        
+        # Validation is always clean, so SupCon is computed
+        criterion.alpha = 0.2 
+        
         with torch.no_grad():
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
