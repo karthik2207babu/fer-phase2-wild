@@ -12,7 +12,7 @@ class FRITTransformer(nn.Module):
     ):
         super(FRITTransformer, self).__init__()
 
-        # Restored to 9 patches (12x12 window, stride 8)
+        # Set to 9 patches for the overlapping local extraction
         self.num_patches = 9
         self.pos_drop = nn.Dropout(p=dropout)
         
@@ -29,7 +29,6 @@ class FRITTransformer(nn.Module):
         # ==========================================
         # 2. GLOBAL-LOCAL FUSION (Cross-Attention)
         # ==========================================
-        # Native PyTorch Cross-Attention
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
