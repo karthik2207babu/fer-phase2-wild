@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn 
+import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, ConcatDataset, Dataset
 from tqdm import tqdm
@@ -15,7 +15,7 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 80           # UPDATED: Increased to 80 to allow for longer clean tuning
+EPOCHS = 80           
 LEARNING_RATE = 5e-5 
 EARLY_STOPPING_PATIENCE = 15
 
@@ -32,9 +32,8 @@ EXTRACT_PATH = "/content/data"
 AFFECTNET_DIR = os.path.join(EXTRACT_PATH, "affectnet/affectnet/Train") 
 PSEUDO_CSV = "/content/drive/MyDrive/pseudo_labeled_affectnet.csv"
 
-# Weights & Save Paths
-PRETRAINED_WEIGHTS = "/content/drive/MyDrive/FER_Phase3_Results/best_frit_weights_mixup.pth"
-SAVE_DIR = "/content/drive/MyDrive/raf_trained_on_ferplus_weights"
+# Save Path
+SAVE_DIR = "/content/drive/MyDrive/raf_trained_scratch_weights"
 
 # --- MixUp Function ---
 def mixup_data(x, y, alpha=0.2, device='cuda'):
@@ -69,7 +68,7 @@ class PseudoLabelDataset(Dataset):
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Starting Pseudo-Label + MixUp Decay Training on: {device}")
+    print(f"Starting 10-Token Architecture Training from Scratch on: {device}")
     
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -95,40 +94,28 @@ def train():
     print(f"Ready! Training on {len(combined_train_dataset)} Total Images.")
 
     # =========================================================
-    # --- FERPLUS TO RAF-DB BRIDGE ---
+    # --- TRUE MRAN ARCHITECTURE: TRAINING FROM SCRATCH ---
     # =========================================================
-    FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_sgd_0.01.pth" 
     
-    model = FRITNet(num_classes=8, transformer_depth=2).to(device)
+    # Initialize directly for 7 classes
+    model = FRITNet(num_classes=7, transformer_depth=2).to(device)
+    print("--> Initialized fresh 10-token FRITNet architecture for RAF-DB (7 classes).")
 
-    if os.path.exists(FERPLUS_WEIGHTS):
-        print(f"--> Loading stabilized FERPlus Base Weights: {FERPLUS_WEIGHTS}")
-        model.load_state_dict(torch.load(FERPLUS_WEIGHTS, map_location=device), strict=False)
-    else:
-        print(f"--> WARNING: FERPlus weights not found at {FERPLUS_WEIGHTS}!")
-
-    print("--> Reinitializing classification heads for 7 classes (RAF-DB)...")
-    embed_dim = 128
-    
-    model.transformer.head[2] = nn.Linear(embed_dim, 7).to(device)
-    model.transformer.aux_global_head = nn.Linear(embed_dim, 7).to(device)
-    model.transformer.aux_local_head = nn.Linear(embed_dim, 7).to(device)
-    
+    # Initialize Loss (alpha=0.0 disables SupCon during MixUp)
     criterion = CombinedFERLoss(feat_dim=128, alpha=0.0).to(device)
 
+    # Ensure backbone requires gradients
     for param in model.backbone.parameters():
         param.requires_grad = True
 
-    base_transformer_params = [p for n, p in model.transformer.named_parameters() if 'head' not in n]
-    head_params = [p for n, p in model.transformer.named_parameters() if 'head' in n]
-
+    # Unified Optimizer: Full LR for the custom modules, lower LR for the VGGFace2 backbone
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1}, 
-        {'params': model.lfa.parameters(), 'lr': LEARNING_RATE * 0.1},
-        {'params': model.safm.parameters(), 'lr': LEARNING_RATE * 0.1},
-        {'params': base_transformer_params, 'lr': LEARNING_RATE * 0.1},
-        {'params': head_params, 'lr': LEARNING_RATE}
+        {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
+        {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
+        {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
     ], weight_decay=1e-3)
+    # =========================================================
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
@@ -136,7 +123,7 @@ def train():
     best_val_acc = 0.0
     epochs_without_improvement = 0
 
-    log_file_path = os.path.join(SAVE_DIR, "training_log_decay.txt")
+    log_file_path = os.path.join(SAVE_DIR, "training_log_scratch.txt")
     log_file = open(log_file_path, "w")
     log_file.write("Epoch,MixUp_Prob,Train_Loss,Train_Acc,Val_Loss,Val_Acc\n")
 
@@ -144,7 +131,7 @@ def train():
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
         
-        # UPDATED: Extended Warmup to 15 Epochs, Max MixUp capped at 0.5
+        # Extended Warmup to 15 Epochs, Max MixUp capped at 0.5
         if epoch < 15:
             mixup_prob = 0.0
         else:
@@ -205,7 +192,7 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            weights_path = os.path.join(SAVE_DIR, "best_15_mixup.pth")
+            weights_path = os.path.join(SAVE_DIR, "best_frit_weights_scratch.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best weights: {v_acc:.4f}")
             epochs_without_improvement = 0
@@ -225,7 +212,7 @@ def train():
     plt.subplot(1, 2, 1); plt.plot(history['train_acc'], label='Train'); plt.plot(history['val_acc'], label='Val'); plt.title('Accuracy'); plt.legend()
     plt.subplot(1, 2, 2); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     
-    plot_path = os.path.join(SAVE_DIR, "training_results_plot_decay.png")
+    plot_path = os.path.join(SAVE_DIR, "training_results_plot_scratch.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
