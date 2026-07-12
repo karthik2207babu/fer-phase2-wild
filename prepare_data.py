@@ -30,17 +30,17 @@ def get_ferplus_dataloaders(root_dir, batch_size=64):
         train_dir = subdirs[0]
         val_dir = subdirs[1] if len(subdirs) > 1 else subdirs[0]
 
-    # ==========================================
-    # HEAVY DATA AUGMENTATION DISABLED
+   # ==========================================
+    # HEAVY DATA AUGMENTATION RE-ENABLED
     # ==========================================
     train_transform = T.Compose([
         T.Resize((224, 224)),
         T.RandomHorizontalFlip(),
-        # T.RandomRotation(15),
-        # T.ColorJitter(brightness=0.2, contrast=0.2), 
+        T.RandomRotation(15),
+        T.ColorJitter(brightness=0.2, contrast=0.2), 
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        # T.RandomErasing(p=0.5, scale=(0.02, 0.2)) 
+        T.RandomErasing(p=0.5, scale=(0.02, 0.2)) 
     ])
 
     val_transform = T.Compose([
