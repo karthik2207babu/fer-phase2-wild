@@ -32,21 +32,21 @@ def train():
     model = FRITNet(num_classes=8, transformer_depth=2).to(device)
     criterion = FERPlusMRANLoss(smoothing=0.15).to(device)
 
-    # Freeze only the first 12 layers (basic edge detectors)
-    for param in model.backbone.features[:12].parameters():
-        param.requires_grad = False
+    # 1. THE FIX: Fully unfreeze the backbone exactly like your Colab notebook
+    for param in model.backbone.parameters():
+        param.requires_grad = True
         
-    print("--> Early CNN layers frozen. Fine-tuning remaining blocks at 0.1x LR.")
+    print("--> CNN Backbone fully unfrozen for fine-tuning.")
 
-    # Standard SGD with Momentum. Note the backbone getting lr * 0.1
+    # 2. THE FIX: Aggressive Weight Decay (1e-2) applied strictly to the Transformer
     optimizer = optim.SGD([
-        {'params': filter(lambda p: p.requires_grad, model.backbone.parameters()), 'lr': LEARNING_RATE * 0.1},
-        {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
-        {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
-        {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
-    ], momentum=0.9, weight_decay=WEIGHT_DECAY)
+        {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1, 'weight_decay': 1e-4},
+        {'params': model.lfa.parameters(), 'lr': LEARNING_RATE, 'weight_decay': 1e-4},
+        {'params': model.safm.parameters(), 'lr': LEARNING_RATE, 'weight_decay': 1e-4},
+        {'params': model.transformer.parameters(), 'lr': LEARNING_RATE, 'weight_decay': 1e-2} 
+    ], momentum=0.9)
 
-    # Extended OneCycleLR schedule to 60 epochs for maximum convergence
+    # Extended OneCycleLR schedule to 60 epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=[LEARNING_RATE*0.1, LEARNING_RATE, LEARNING_RATE, LEARNING_RATE],
         steps_per_epoch=len(train_loader), epochs=EPOCHS, pct_start=0.3
