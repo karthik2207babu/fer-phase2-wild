@@ -30,27 +30,20 @@ def get_ferplus_dataloaders(root_dir, batch_size=64):
         train_dir = subdirs[0]
         val_dir = subdirs[1] if len(subdirs) > 1 else subdirs[0]
 
-    # ==========================================
-    # THE FIX: HEAVY DATA AUGMENTATION
-    # ==========================================
+    # The critical spatial augmentation to prevent memorization
     train_transform = T.Compose([
-        T.Resize((224, 224)),
-        T.RandomHorizontalFlip(),
-        T.RandomRotation(15),
-        T.ColorJitter(brightness=0.2, contrast=0.2), # Stop memorizing lighting
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        T.RandomErasing(p=0.5, scale=(0.02, 0.2)) # Black out random facial features
-    ])
-
-    val_transform = T.Compose([
-        T.Resize((224, 224)),
+        T.Resize((256, 256)),        
+        T.RandomCrop((224, 224)),    
+        T.RandomHorizontalFlip(),    
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    print(f"--> Loading Train from: {train_dir}")
-    print(f"--> Loading Val from: {val_dir}")
+    val_transform = T.Compose([
+        T.Resize((224, 224)),        
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
 
     train_dataset = ImageFolder(root=train_dir, transform=train_transform)
     val_dataset = ImageFolder(root=val_dir, transform=val_transform)
