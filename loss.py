@@ -85,3 +85,26 @@ class CombinedFERLoss(nn.Module):
             total_loss += 0.5 * self.focal(aux_local, target, self.class_weights)
 
         return total_loss
+
+# --- ADDED: Clean Joint Optimization Loss For FERPlus ---
+class FERPlusMRANLoss(nn.Module):
+    def __init__(self, smoothing=0.15):
+        super(FERPlusMRANLoss, self).__init__()
+        self.smoothing = smoothing
+
+    def forward(self, logits, features, labels, aux_global=None, aux_local=None):
+        # 'features' is accepted to keep training loop calls uniform, but ignored here 
+        # as we are utilizing pure cross-entropy for FERPlus base optimization.
+        loss_main = F.cross_entropy(logits, labels, label_smoothing=self.smoothing)
+        
+        total_loss = loss_main
+        
+        if aux_global is not None:
+            loss_global = F.cross_entropy(aux_global, labels, label_smoothing=self.smoothing)
+            total_loss += (0.5 * loss_global)
+            
+        if aux_local is not None:
+            loss_local = F.cross_entropy(aux_local, labels, label_smoothing=self.smoothing)
+            total_loss += (0.5 * loss_local)
+
+        return total_loss
