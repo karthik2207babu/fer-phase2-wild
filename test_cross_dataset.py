@@ -1,22 +1,26 @@
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
 
-# Assuming you have a dataset_rafdb.py ready
-from dataset_rafdb import get_rafdb_dataloaders
+# Import your dataset and model
+from dataset import RAFDBDataset
 from model import FRITNet
 
 # --- Configuration ---
 BATCH_SIZE = 64
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
 
+# Paths to your RAF-DB validation data
+RAFDB_VAL_CSV = "/content/drive/MyDrive/RAFDB/val_labels.csv" # Update this path if needed!
+RAFDB_VAL_ROOT = "/content/drive/MyDrive/RAFDB/Image/aligned/" # Update this path if needed!
+
 # ==========================================
 # LABEL TRANSLATION DICTIONARY
 # ==========================================
-# FERPlus Standard: 0:Neutral, 1:Happy, 2:Surprise, 3:Sad, 4:Anger, 5:Disgust, 6:Fear, 7:Contempt
-# RAF-DB Standard (0-indexed): 0:Surprise, 1:Fear, 2:Disgust, 3:Happy, 4:Sad, 5:Anger, 6:Neutral
-# You may need to adjust these integers based on exactly how your ImageFolder sorted the classes!
+# FERPlus Standard (0-7): 0:Neutral, 1:Happy, 2:Surprise, 3:Sad, 4:Anger, 5:Disgust, 6:Fear, 7:Contempt
+# RAF-DB Standard (1-7, converted to 0-6): 0:Surprise, 1:Fear, 2:Disgust, 3:Happy, 4:Sad, 5:Anger, 6:Neutral
 
 FER_TO_RAF_MAP = {
     0: 6,  # FER Neutral -> RAF Neutral
@@ -39,27 +43,28 @@ def run_cross_dataset_inference():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*65}\nStarting Zero-Shot Cross-Dataset Inference (FERPlus -> RAF-DB)\n{'='*65}")
 
-    # 1. Initialize the 8-class model (because the weights are 8-class)
+    # 1. Initialize the 8-class model to match the loaded weights
     model = FRITNet(num_classes=8, transformer_depth=2).to(device)
     
-    # 2. Load the exact aggressive weights directly
+    # 2. Load the optimized FERPlus weights
     print(f"--> Loading base FERPlus weights from: {FERPLUS_WEIGHTS}")
     model.load_state_dict(torch.load(FERPLUS_WEIGHTS))
     model.eval()
 
-    # 3. Load RAF-DB data (we only need the validation/test loader)
-    _, val_loader = get_rafdb_dataloaders(batch_size=BATCH_SIZE)
+    # 3. Initialize your custom RAF-DB validation dataset
+    print("--> Loading RAF-DB Validation dataset...")
+    val_dataset = RAFDBDataset(csv_file=RAFDB_VAL_CSV, root_dir=RAFDB_VAL_ROOT, phase='val')
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
     val_correct, val_total = 0, 0
     
-    print("--> Running inference on RAF-DB test set...")
+    print("--> Running inference...")
     with torch.no_grad():
         pbar = tqdm(val_loader, desc="Inference")
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
             
-            # RAF-DB labels usually start at 1 in the raw text files. 
-            # If your dataset_rafdb.py subtracts 1, ensure targets are 0-6.
+            # Convert RAF-DB 1-7 labels to 0-6 index
             targets = labels - 1 
             
             logits, features, _, _ = model(images)
@@ -67,7 +72,7 @@ def run_cross_dataset_inference():
             # Get the FERPlus prediction (0-7)
             _, fer_predicted = torch.max(logits.data, 1)
             
-            # Translate it to RAF-DB format (0-6)
+            # Translate to RAF-DB format (0-6)
             raf_predicted = translate_predictions(fer_predicted, device)
             
             val_total += targets.size(0)
