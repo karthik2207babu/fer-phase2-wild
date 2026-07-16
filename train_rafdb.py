@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 import os
+import numpy as np
 import matplotlib.pyplot as plt
 
 # Import your custom modules
@@ -13,8 +14,8 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 50           # Extended for a longer cooling tail
-LEARNING_RATE = 3e-4  # Increased to push past the underfitting barrier
+EPOCHS = 50           
+LEARNING_RATE = 3e-4  
 WEIGHT_DECAY = 1e-4
 
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
@@ -31,7 +32,6 @@ def load_pretrained_weights(model, weights_path):
     print(f"--> Loading base FERPlus weights from: {weights_path}")
     state_dict = torch.load(weights_path)
     
-    # Target specific classification head identifiers within the transformer namespace
     targets = ['.head.', 'aux_global_head', 'aux_local_head']
     keys_to_delete = [k for k in state_dict.keys() if any(t in k for t in targets)]
     
@@ -39,33 +39,44 @@ def load_pretrained_weights(model, weights_path):
     for k in keys_to_delete:
         del state_dict[k]
         
-    # strict=False allows the model to safely bypass the missing classification layers
     model.load_state_dict(state_dict, strict=False)
     print("--> Successfully injected pre-trained facial geometry.")
     return model
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*65}\nStarting RAF-DB Fine-Tuning | LR: {LEARNING_RATE} | Epochs: {EPOCHS}\n{'='*65}")
+    print(f"\n{'='*65}\nStarting Two-Stage RAF-DB Fine-Tuning | LR: {LEARNING_RATE} | Epochs: {EPOCHS}\n{'='*65}")
     
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # 1. Initialize model specifically for 7 classes
     model = FRITNet(num_classes=7, transformer_depth=2).to(device)
     model = load_pretrained_weights(model, FERPLUS_WEIGHTS)
 
-    # 2. Datasets & Loaders
     print("--> Loading RAF-DB datasets...")
     train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+    # ---------------------------------------------------------
+    # DYNAMIC CLASS WEIGHTING & SAMPLER
+    # ---------------------------------------------------------
+    # Extract labels (subtracting 1 to match 0-6 indexing)
+    train_labels = train_dataset.annotations.iloc[:, 1].values - 1
+    class_counts = np.bincount(train_labels)
+    class_weights = 1.0 / class_counts
+    sample_weights = class_weights[train_labels]
+    
+    sampler = WeightedRandomSampler(
+        weights=sample_weights, 
+        num_samples=len(sample_weights), 
+        replacement=True
+    )
+    
+    # shuffle=True is incompatible with a custom sampler, so it is removed.
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    # 3. Loss & Optimizer
     criterion = CombinedFERLoss(feat_dim=128, num_classes=7, alpha=0.2).to(device)
 
-    # Fine-tuning sub-module tracking
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1},
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
@@ -79,6 +90,20 @@ def train():
     best_val_acc = 0.0
 
     for epoch in range(EPOCHS):
+        
+        # ---------------------------------------------------------
+        # TWO-STAGE GRADIENT FREEZING
+        # ---------------------------------------------------------
+        if epoch == 0:
+            print("\n--> STAGE 1: Freezing feature extractors. Training classification heads only.")
+            for name, param in model.named_parameters():
+                if 'head' not in name:
+                    param.requires_grad = False
+        elif epoch == 5:
+            print("\n--> STAGE 2: Unfreezing full network for precise alignment.")
+            for param in model.parameters():
+                param.requires_grad = True
+
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
         
@@ -105,7 +130,6 @@ def train():
 
         scheduler.step()
 
-        # Validation Phase
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
         
@@ -135,7 +159,6 @@ def train():
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best RAF-DB weights: {v_acc:.4f}")
 
-    # Plot and save training graphs
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
     plt.plot(history['train_acc'], label='Train')
