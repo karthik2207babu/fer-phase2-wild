@@ -14,7 +14,7 @@ from loss import CombinedFERLoss
 # --- Configuration ---
 BATCH_SIZE = 64
 EPOCHS = 40
-LEARNING_RATE = 1e-4  # Significantly lowered for fine-tuning
+LEARNING_RATE = 1e-4  
 WEIGHT_DECAY = 1e-4
 
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
@@ -31,18 +31,15 @@ def load_pretrained_weights(model, weights_path):
     print(f"--> Loading base FERPlus weights from: {weights_path}")
     state_dict = torch.load(weights_path)
     
-    # Isolate and delete the classification heads from the saved weights
-    # FERPlus had 8 classes, RAF-DB has 7. We must drop these matrices.
-    keys_to_delete = [
-        k for k in state_dict.keys() 
-        if k.startswith('head.') or k.startswith('aux_global_head.') or k.startswith('aux_local_head.')
-    ]
+    # Target specific classification head identifiers within the transformer namespace
+    targets = ['.head.', 'aux_global_head', 'aux_local_head']
+    keys_to_delete = [k for k in state_dict.keys() if any(t in k for t in targets)]
     
+    print(f"--> Stripping {len(keys_to_delete)} mismatching 8-class head tensors...")
     for k in keys_to_delete:
         del state_dict[k]
         
-    # strict=False allows the model to load everything EXCEPT the missing heads.
-    # The new 7-class heads will initialize with random weights.
+    # strict=False allows the model to safely bypass the missing classification layers
     model.load_state_dict(state_dict, strict=False)
     print("--> Successfully injected pre-trained facial geometry.")
     return model
@@ -65,11 +62,10 @@ def train():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    # 3. Loss & Optimizer (AdamW is preferred for fine-tuning)
+    # 3. Loss & Optimizer
     criterion = CombinedFERLoss(feat_dim=128, num_classes=7, alpha=0.2).to(device)
 
-    # The backbone receives an even smaller learning rate (LR * 0.1) 
-    # to protect the foundational edge detectors.
+    # Fine-tuning sub-module tracking
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1},
         {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
@@ -77,7 +73,6 @@ def train():
         {'params': model.transformer.parameters(), 'lr': LEARNING_RATE}
     ], weight_decay=WEIGHT_DECAY)
 
-    # Cosine Annealing smoothly drops the LR to 0 by the final epoch
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
@@ -91,16 +86,12 @@ def train():
 
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
-            
-            # Align RAF-DB 1-7 labels to 0-6 index for PyTorch
             targets = labels - 1 
             
             optimizer.zero_grad()
             logits, features, aux_global, aux_local = model(images)
             
             loss = criterion(logits, features, targets + 1, aux_global, aux_local) 
-            # Note: CombinedFERLoss internally expects raw labels (1-7) to subtract 1 for the focal loss,
-            # but relies on raw labels for SupCon matrix matching. Passing targets+1 retains compatibility.
 
             loss.backward()
             optimizer.step()
