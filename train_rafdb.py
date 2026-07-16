@@ -16,11 +16,11 @@ from loss import CombinedFERLoss
 BATCH_SIZE = 64
 EPOCHS = 50           
 LEARNING_RATE = 3e-4  
-WEIGHT_DECAY = 1e-2  # Aggressively increased to penalize memorization
+WEIGHT_DECAY = 1e-2  # High weight decay to combat sampler duplication
 
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
 SAVE_DIR = "/content/drive/MyDrive/RAFDB_Results"
-UNIQUE_WEIGHT_NAME = "best_rafdb_regularized_sampler.pth"
+UNIQUE_WEIGHT_NAME = "best_rafdb_mixup_regularized.pth"
 
 # --- Verified Local Paths ---
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -46,7 +46,7 @@ def load_pretrained_weights(model, weights_path):
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*65}\nStarting Regularized RAF-DB Fine-Tuning | LR: {LEARNING_RATE} | WD: {WEIGHT_DECAY}\n{'='*65}")
+    print(f"\n{'='*65}\nStarting RAF-DB Fine-Tuning | Dynamic MixUp | WD: {WEIGHT_DECAY}\n{'='*65}")
     
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -87,6 +87,9 @@ def train():
 
     for epoch in range(EPOCHS):
         
+        # ---------------------------------------------------------
+        # TWO-STAGE GRADIENT FREEZING
+        # ---------------------------------------------------------
         if epoch == 0:
             print("\n--> STAGE 1: Freezing feature extractors. Training classification heads only.")
             for name, param in model.named_parameters():
@@ -96,6 +99,21 @@ def train():
             print("\n--> STAGE 2: Unfreezing full network for precise alignment.")
             for param in model.parameters():
                 param.requires_grad = True
+
+        # ---------------------------------------------------------
+        # DYNAMIC MIXUP SCHEDULE
+        # ---------------------------------------------------------
+        mixup_active = False
+        mixup_alpha = 0.0
+        
+        if epoch >= 7:
+            mixup_active = True
+            # Starts at 0.1, increases by 0.1 every 5 epochs
+            increments = (epoch - 7) // 5
+            # Cap at 0.5 to prevent complete structural degradation
+            mixup_alpha = min(0.1 + (increments * 0.1), 0.5)
+            
+            print(f"--> Dynamic MixUp Active: Alpha = {mixup_alpha:.1f}")
 
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
@@ -107,22 +125,46 @@ def train():
             targets = labels - 1 
             
             optimizer.zero_grad()
-            logits, features, aux_global, aux_local = model(images)
-            
-            loss = criterion(logits, features, targets + 1, aux_global, aux_local) 
+
+            # --- MIXUP ROUTINE ---
+            if mixup_active and mixup_alpha > 0:
+                lam = np.random.beta(mixup_alpha, mixup_alpha)
+                lam = max(lam, 1 - lam) # Ensure primary image is always > 50%
+                
+                index = torch.randperm(images.size(0)).to(device)
+                
+                mixed_images = lam * images + (1 - lam) * images[index]
+                
+                logits, features, aux_global, aux_local = model(mixed_images)
+                
+                # Interpolate the loss between the two mixed targets
+                loss_a = criterion(logits, features, targets + 1, aux_global, aux_local)
+                loss_b = criterion(logits, features, targets[index] + 1, aux_global, aux_local)
+                loss = lam * loss_a + (1 - lam) * loss_b
+                
+                # Accuracy tracking is mapped to the primary/dominant image
+                _, predicted = torch.max(logits.data, 1)
+                train_correct += (predicted == targets).sum().item()
+
+            # --- STANDARD ROUTINE ---
+            else:
+                logits, features, aux_global, aux_local = model(images)
+                loss = criterion(logits, features, targets + 1, aux_global, aux_local) 
+                
+                _, predicted = torch.max(logits.data, 1)
+                train_correct += (predicted == targets).sum().item()
 
             loss.backward()
             optimizer.step()
             
             train_loss += loss.item()
-            _, predicted = torch.max(logits.data, 1)
             train_total += targets.size(0)
-            train_correct += (predicted == targets).sum().item()
             
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
         scheduler.step()
 
+        # Validation Phase (Always clean, unmixed data)
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
         
@@ -152,6 +194,7 @@ def train():
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best RAF-DB weights: {v_acc:.4f} at {UNIQUE_WEIGHT_NAME}")
 
+    # Plotting
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
     plt.plot(history['train_acc'], label='Train')
@@ -165,7 +208,7 @@ def train():
     plt.title('RAF-DB Loss')
     plt.legend()
     
-    plot_path = os.path.join(SAVE_DIR, "training_results_rafdb_regularized.png")
+    plot_path = os.path.join(SAVE_DIR, "training_results_mixup_regularized.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
