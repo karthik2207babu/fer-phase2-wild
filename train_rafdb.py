@@ -155,7 +155,7 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            weights_path = os.path.join(SAVE_DIR, "best_rafdb_finetuned.pth")
+            weights_path = os.path.join(SAVE_DIR, "best_rafdb_finetuned_2.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"--> Saved new best RAF-DB weights: {v_acc:.4f}")
 
