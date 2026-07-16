@@ -5,9 +5,6 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 import torch
 
-# ============================
-# Controlled Random Masking (Updated)
-# ============================
 class RandomMasking:
     def __init__(self, min_area=0.04, max_area=0.2):
         self.min_area = min_area
@@ -16,8 +13,8 @@ class RandomMasking:
     def __call__(self, img):
         rand_val = torch.rand(1).item()
         
-        # 50% chance of NO mask (0.5 to 1.0)
-        if rand_val > 0.5:
+        # 70% chance of NO mask (0.3 to 1.0). 30% chance of mask.
+        if rand_val > 0.3:
             return img
 
         C, H, W = img.shape
@@ -32,14 +29,11 @@ class RandomMasking:
         if h >= H // 2 or w >= W:
             return img
 
-        # Random horizontal placement
         left = torch.randint(0, W - w, (1,)).item()
 
-        if rand_val <= 0.25:
-            # 25% chance: Upper region (0 to H/2)
+        if rand_val <= 0.15:
             top = torch.randint(0, max(1, (H // 2) - h), (1,)).item()
         else:
-            # 25% chance: Lower region (H/2 to H)
             top = torch.randint(H // 2, max((H // 2) + 1, H - h), (1,)).item()
 
         img[:, top:top+h, left:left+w] = 0

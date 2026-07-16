@@ -16,10 +16,11 @@ from loss import CombinedFERLoss
 BATCH_SIZE = 64
 EPOCHS = 50           
 LEARNING_RATE = 3e-4  
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 1e-2  # Aggressively increased to penalize memorization
 
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
 SAVE_DIR = "/content/drive/MyDrive/RAFDB_Results"
+UNIQUE_WEIGHT_NAME = "best_rafdb_regularized_sampler.pth"
 
 # --- Verified Local Paths ---
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -45,7 +46,7 @@ def load_pretrained_weights(model, weights_path):
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*65}\nStarting Two-Stage RAF-DB Fine-Tuning | LR: {LEARNING_RATE} | Epochs: {EPOCHS}\n{'='*65}")
+    print(f"\n{'='*65}\nStarting Regularized RAF-DB Fine-Tuning | LR: {LEARNING_RATE} | WD: {WEIGHT_DECAY}\n{'='*65}")
     
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -56,10 +57,6 @@ def train():
     train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
 
-    # ---------------------------------------------------------
-    # DYNAMIC CLASS WEIGHTING & SAMPLER
-    # ---------------------------------------------------------
-    # Extract labels (subtracting 1 to match 0-6 indexing)
     train_labels = train_dataset.annotations.iloc[:, 1].values - 1
     class_counts = np.bincount(train_labels)
     class_weights = 1.0 / class_counts
@@ -71,7 +68,6 @@ def train():
         replacement=True
     )
     
-    # shuffle=True is incompatible with a custom sampler, so it is removed.
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
@@ -91,9 +87,6 @@ def train():
 
     for epoch in range(EPOCHS):
         
-        # ---------------------------------------------------------
-        # TWO-STAGE GRADIENT FREEZING
-        # ---------------------------------------------------------
         if epoch == 0:
             print("\n--> STAGE 1: Freezing feature extractors. Training classification heads only.")
             for name, param in model.named_parameters():
@@ -155,9 +148,9 @@ def train():
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
-            weights_path = os.path.join(SAVE_DIR, "best_rafdb_finetuned_2.pth")
+            weights_path = os.path.join(SAVE_DIR, UNIQUE_WEIGHT_NAME)
             torch.save(model.state_dict(), weights_path)
-            print(f"--> Saved new best RAF-DB weights: {v_acc:.4f}")
+            print(f"--> Saved new best RAF-DB weights: {v_acc:.4f} at {UNIQUE_WEIGHT_NAME}")
 
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
@@ -172,7 +165,7 @@ def train():
     plt.title('RAF-DB Loss')
     plt.legend()
     
-    plot_path = os.path.join(SAVE_DIR, "training_results_rafdb.png")
+    plot_path = os.path.join(SAVE_DIR, "training_results_rafdb_regularized.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
