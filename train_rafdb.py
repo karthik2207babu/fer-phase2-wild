@@ -13,8 +13,8 @@ from loss import CombinedFERLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 40
-LEARNING_RATE = 1e-4  
+EPOCHS = 50           # Extended for a longer cooling tail
+LEARNING_RATE = 3e-4  # Increased to push past the underfitting barrier
 WEIGHT_DECAY = 1e-4
 
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
