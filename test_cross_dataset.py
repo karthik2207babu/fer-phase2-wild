@@ -12,9 +12,12 @@ from model import FRITNet
 BATCH_SIZE = 64
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
 
-# Paths to your RAF-DB validation data
-RAFDB_VAL_CSV = "/content/drive/MyDrive/RAFDB/val_labels.csv" # Update this path if needed!
-RAFDB_VAL_ROOT = "/content/drive/MyDrive/RAFDB/Image/aligned/" # Update this path if needed!
+# ==========================================
+# VERIFIED LOCAL RAF-DB PATHS
+# ==========================================
+BASE_PATH = "/content/data/Datasets/RAF-DB"
+RAFDB_VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
+RAFDB_VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
 # ==========================================
 # LABEL TRANSLATION DICTIONARY
@@ -51,8 +54,8 @@ def run_cross_dataset_inference():
     model.load_state_dict(torch.load(FERPLUS_WEIGHTS))
     model.eval()
 
-    # 3. Initialize your custom RAF-DB validation dataset
-    print("--> Loading RAF-DB Validation dataset...")
+    # 3. Initialize your custom RAF-DB dataset using the test paths
+    print(f"--> Loading RAF-DB Test dataset from: {RAFDB_VAL_CSV}")
     val_dataset = RAFDBDataset(csv_file=RAFDB_VAL_CSV, root_dir=RAFDB_VAL_ROOT, phase='val')
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
@@ -64,7 +67,7 @@ def run_cross_dataset_inference():
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
             
-            # Convert RAF-DB 1-7 labels to 0-6 index
+            # Convert RAF-DB 1-7 labels to 0-6 index for mathematical comparison
             targets = labels - 1 
             
             logits, features, _, _ = model(images)
