@@ -16,11 +16,11 @@ from loss import CombinedFERLoss
 BATCH_SIZE = 64
 EPOCHS = 50           
 LEARNING_RATE = 3e-4  
-WEIGHT_DECAY = 1e-2  # High weight decay to combat sampler duplication
+WEIGHT_DECAY = 1e-2  
 
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
 SAVE_DIR = "/content/drive/MyDrive/RAFDB_Results"
-UNIQUE_WEIGHT_NAME = "best_rafdb_mixup_regularized.pth"
+UNIQUE_WEIGHT_NAME = "best_rafdb_curriculum_mixup.pth"
 
 # --- Verified Local Paths ---
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -46,7 +46,7 @@ def load_pretrained_weights(model, weights_path):
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*65}\nStarting RAF-DB Fine-Tuning | Dynamic MixUp | WD: {WEIGHT_DECAY}\n{'='*65}")
+    print(f"\n{'='*65}\nStarting RAF-DB Fine-Tuning | Curriculum MixUp | WD: {WEIGHT_DECAY}\n{'='*65}")
     
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -101,19 +101,31 @@ def train():
                 param.requires_grad = True
 
         # ---------------------------------------------------------
-        # DYNAMIC MIXUP SCHEDULE
+        # CURRICULUM MIXUP SCHEDULE (WARM-UP & COOL-DOWN)
         # ---------------------------------------------------------
         mixup_active = False
         mixup_alpha = 0.0
         
-        if epoch >= 7:
+        if 5 <= epoch <= 29:
+            # Ascending phase (Epochs 5 to 29)
             mixup_active = True
-            # Starts at 0.1, increases by 0.1 every 5 epochs
-            increments = (epoch - 7) // 5
-            # Cap at 0.5 to prevent complete structural degradation
+            increments = (epoch - 5) // 5
             mixup_alpha = min(0.1 + (increments * 0.1), 0.5)
-            
-            print(f"--> Dynamic MixUp Active: Alpha = {mixup_alpha:.1f}")
+        elif 30 <= epoch <= 44:
+            # Descending phase (Epochs 30 to 44)
+            mixup_active = True
+            decrements = (epoch - 30) // 5
+            mixup_alpha = max(0.4 - (decrements * 0.1), 0.1)
+        elif epoch >= 45:
+            # Clean convergence phase (Epochs 45 to 50)
+            mixup_active = False
+            mixup_alpha = 0.0
+
+        if mixup_active:
+            print(f"--> Curriculum MixUp Active: Alpha = {mixup_alpha:.1f}")
+        else:
+            if epoch >= 45:
+                print("--> MixUp Disabled: Clean data optimization phase")
 
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
@@ -129,7 +141,7 @@ def train():
             # --- MIXUP ROUTINE ---
             if mixup_active and mixup_alpha > 0:
                 lam = np.random.beta(mixup_alpha, mixup_alpha)
-                lam = max(lam, 1 - lam) # Ensure primary image is always > 50%
+                lam = max(lam, 1 - lam) 
                 
                 index = torch.randperm(images.size(0)).to(device)
                 
@@ -137,12 +149,10 @@ def train():
                 
                 logits, features, aux_global, aux_local = model(mixed_images)
                 
-                # Interpolate the loss between the two mixed targets
                 loss_a = criterion(logits, features, targets + 1, aux_global, aux_local)
                 loss_b = criterion(logits, features, targets[index] + 1, aux_global, aux_local)
                 loss = lam * loss_a + (1 - lam) * loss_b
                 
-                # Accuracy tracking is mapped to the primary/dominant image
                 _, predicted = torch.max(logits.data, 1)
                 train_correct += (predicted == targets).sum().item()
 
@@ -164,7 +174,7 @@ def train():
 
         scheduler.step()
 
-        # Validation Phase (Always clean, unmixed data)
+        # Validation Phase
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
         
@@ -208,7 +218,7 @@ def train():
     plt.title('RAF-DB Loss')
     plt.legend()
     
-    plot_path = os.path.join(SAVE_DIR, "training_results_mixup_regularized.png")
+    plot_path = os.path.join(SAVE_DIR, "training_results_curriculum_mixup.png")
     plt.savefig(plot_path)
     print(f"Graphs saved to {plot_path}")
 
