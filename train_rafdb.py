@@ -20,7 +20,7 @@ WEIGHT_DECAY = 1e-2
 
 FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
 SAVE_DIR = "/content/drive/MyDrive/RAFDB_Results"
-UNIQUE_WEIGHT_NAME = "best_rafdb_curriculum_mixup.pth"
+UNIQUE_WEIGHT_NAME = "best_rafdb_curriculum_mixup_2.pth"
 
 # --- Verified Local Paths ---
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -100,8 +100,8 @@ def train():
             for param in model.parameters():
                 param.requires_grad = True
 
-        # ---------------------------------------------------------
-        # CURRICULUM MIXUP SCHEDULE (WARM-UP & COOL-DOWN)
+# ---------------------------------------------------------
+        # CURRICULUM MIXUP SCHEDULE (MICRO-NOISE FLOOR)
         # ---------------------------------------------------------
         mixup_active = False
         mixup_alpha = 0.0
@@ -117,9 +117,9 @@ def train():
             decrements = (epoch - 30) // 5
             mixup_alpha = max(0.4 - (decrements * 0.1), 0.1)
         elif epoch >= 45:
-            # Clean convergence phase (Epochs 45 to 50)
-            mixup_active = False
-            mixup_alpha = 0.0
+            # Micro-noise phase (Epochs 45 to 50) - Prevents T-Acc spike
+            mixup_active = True
+            mixup_alpha = 0.05
 
         if mixup_active:
             print(f"--> Curriculum MixUp Active: Alpha = {mixup_alpha:.1f}")
