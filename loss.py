@@ -32,23 +32,29 @@ class SupConLoss(nn.Module):
         return loss
 
 class WeightedFocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, label_smoothing=0.1):
+    def __init__(self, gamma=2.0, label_smoothing=0.0):
         super(WeightedFocalLoss, self).__init__()
         self.gamma = gamma
-        self.label_smoothing = label_smoothing
+        # Set to 0.0. We need hard targets to crush gradients on easy examples.
+        self.label_smoothing = label_smoothing 
 
     def forward(self, inputs, targets, weights=None):
         if weights is not None:
             weights = weights.to(inputs.device)
             
+        # CRITICAL FIX: reduction='none' computes loss per image in the batch
         ce_loss = F.cross_entropy(
             inputs, 
             targets, 
             weight=weights, 
-            label_smoothing=self.label_smoothing
+            label_smoothing=self.label_smoothing,
+            reduction='none' 
         )
+        
+        # Now pt is a tensor of probabilities for each individual image
         pt = torch.exp(-ce_loss)
         focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        
         return focal_loss.mean()
 
 class CombinedFERLoss(nn.Module):
@@ -58,12 +64,11 @@ class CombinedFERLoss(nn.Module):
         self.alpha = alpha
         
         self.supcon = SupConLoss(temperature=0.07)
-        self.focal = WeightedFocalLoss(gamma=2.0, label_smoothing=0.1) 
+        # Initialize the fixed Focal Loss
+        self.focal = WeightedFocalLoss(gamma=2.0, label_smoothing=0.0) 
         
-        weights = torch.tensor([
-            0.2178, 1.0000, 0.3919, 0.0589, 0.1418, 0.3986, 0.1113
-        ])
-        self.register_buffer('class_weights', weights)
+        # Bypassed static weights. Focal loss natively balances classes dynamically.
+        self.class_weights = None
 
     def forward(self, logits, features, labels, aux_global=None, aux_local=None):
         target = labels - 1
