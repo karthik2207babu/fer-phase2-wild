@@ -42,15 +42,21 @@ def train_crt():
         param.requires_grad = False
         
     print("--> Unfreezing classification heads...")
-    # Adjust these string matches based on exactly what you named your final FC layers in model.py
-    # Common names: 'fc', 'classifier', 'main_logits', 'aux_global', 'aux_local'
+    
     unfrozen_params = 0
     for name, param in model.named_parameters():
-        if 'fc' in name.lower() or 'logit' in name.lower() or 'classifier' in name.lower():
-            param.requires_grad = True
-            unfrozen_params += param.numel()
+        # Broaden the search to catch your specific linear layer naming conventions
+        if any(keyword in name.lower() for keyword in ['fc', 'logit', 'classifier', 'head', 'main', 'aux', 'out']):
+            # Strictly protect transformer attention and norm layers from unfreezing
+            if 'attn' not in name.lower() and 'attention' not in name.lower() and 'norm' not in name.lower():
+                param.requires_grad = True
+                unfrozen_params += param.numel()
+                print(f"  [SUCCESS] Unfroze layer: {name}")
     
     print(f"--> Total trainable parameters for cRT: {unfrozen_params}")
+    
+    if unfrozen_params == 0:
+        raise ValueError("Still 0 parameters! Please check model.py to see exactly what you named your final Linear layers (e.g., self.fc, self.main_logits, etc.) and add that word to the search list above.")
 
     # 3. Load Datasets and Class-Balanced Sampler
     train_dataset = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
