@@ -55,7 +55,7 @@ def main():
     
     # Paths
     data_dir = '/content/data/Datasets/RAF-DB/DATASET'
-    pretrained_weights_path = 'best_rafdb_averaged.pth' # Your 88.07% Model Soup
+    pretrained_weights_path = "/content/drive/MyDrive/RAFDB_Results/averaged_models_init.pth" # Your 88.07% Model Soup
     save_path = 'best_rafdb_crt_ldam.pth'               # UNIQUE weight save name
 
     # --- Data Loading ---
