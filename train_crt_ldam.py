@@ -54,7 +54,7 @@ def main():
     cls_num_list = [1290, 281, 717, 4772, 1982, 705, 2524] 
     
     # Paths
-    data_dir = './RAF-DB/basic'
+    data_dir = '/content/data/Datasets/RAF-DB/DATASET'
     pretrained_weights_path = 'best_rafdb_averaged.pth' # Your 88.07% Model Soup
     save_path = 'best_rafdb_crt_ldam.pth'               # UNIQUE weight save name
 
