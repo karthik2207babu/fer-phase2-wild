@@ -1,10 +1,9 @@
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader, ConcatDataset, Dataset
+from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
 from tqdm import tqdm
 import os
-import pandas as pd
 from PIL import Image
 from sklearn.metrics import recall_score
 
@@ -25,10 +24,6 @@ TRAIN_CSV = os.path.join(BASE_PATH, "train_labels.csv")
 VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
 TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
-ZIP_PATH = "/content/drive/MyDrive/affectnet.zip"
-EXTRACT_PATH = "/content/data"
-AFFECTNET_DIR = os.path.join(EXTRACT_PATH, "affectnet/affectnet/Train") 
-PSEUDO_CSV = "/content/drive/MyDrive/pseudo_labeled_affectnet.csv"
 
 # --- Dual-View Dataset Wrapper ---
 class DualViewDataset(Dataset):
@@ -55,48 +50,29 @@ class DualViewDataset(Dataset):
         return len(self.base_dataset)
 
     def __getitem__(self, idx):
-        # Extract safely based on dataset type
-        if hasattr(self.base_dataset, 'annotations'):
-            img_name = str(self.base_dataset.annotations.iloc[idx, 0])
-            label = int(self.base_dataset.annotations.iloc[idx, 1])
-            img_path = os.path.join(self.base_dataset.root_dir, str(label), img_name)
-        else:
-            img_path = self.base_dataset.data.iloc[idx]['file_path']
-            label = int(self.base_dataset.data.iloc[idx]['label'])
+        # We are purely using RAFDBDataset now, so we can directly access its annotations
+        img_name = str(self.base_dataset.annotations.iloc[idx, 0])
+        label = int(self.base_dataset.annotations.iloc[idx, 1])
+        img_path = os.path.join(self.base_dataset.root_dir, str(label), img_name)
 
         image_pil = Image.open(img_path).convert('RGB')
         return self.clean_transform(image_pil), self.aug_transform(image_pil), label
 
-class PseudoLabelDataset(Dataset):
-    def __init__(self, csv_file):
-        self.data = pd.read_csv(csv_file)
-    def __len__(self):
-        return len(self.data)
-    def __getitem__(self, idx):
-        return None # Handled by wrapper
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*70}\nStarting Full 50-Epoch Training with NLA Framework\n{'='*70}")
+    print(f"\n{'='*70}\nStarting Pure RAF-DB Training with NLA Framework\n{'='*70}")
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    if not os.path.exists(AFFECTNET_DIR) and os.path.exists(ZIP_PATH):
-        os.makedirs(EXTRACT_PATH, exist_ok=True)
-        os.system(f'unzip -q -n "{ZIP_PATH}" -d "{EXTRACT_PATH}"')
-
-    # Data Loading
+    # Data Loading (Strictly RAF-DB)
     raf_train = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
-    if os.path.exists(PSEUDO_CSV):
-        pseudo_train = PseudoLabelDataset(csv_file=PSEUDO_CSV)
-        raw_combined = ConcatDataset([raf_train, pseudo_train])
-    else:
-        raw_combined = raf_train
-
-    train_dataset = DualViewDataset(raw_combined)
+    train_dataset = DualViewDataset(raf_train)
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
+
+    print(f"--> Training strictly on RAF-DB dataset: {len(raf_train)} images.")
 
     # Model & Loss Initialization
     model = FRITNet(num_classes=7, transformer_depth=2).to(device)
