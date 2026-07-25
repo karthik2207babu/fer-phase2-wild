@@ -25,19 +25,20 @@ VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
 TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
+# ADDED: FERPlus weights path
+FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
+
 # --- Dual-View Dataset Wrapper ---
 class DualViewDataset(Dataset):
     def __init__(self, base_dataset):
         self.base_dataset = base_dataset
         
-        # Clean view
         self.clean_transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-        # Non-spatial augmented view (protects asymmetric LFA)
         self.aug_transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
@@ -50,7 +51,6 @@ class DualViewDataset(Dataset):
         return len(self.base_dataset)
 
     def __getitem__(self, idx):
-        # We are purely using RAFDBDataset now, so we can directly access its annotations
         img_name = str(self.base_dataset.annotations.iloc[idx, 0])
         label = int(self.base_dataset.annotations.iloc[idx, 1])
         img_path = os.path.join(self.base_dataset.root_dir, str(label), img_name)
@@ -58,13 +58,28 @@ class DualViewDataset(Dataset):
         image_pil = Image.open(img_path).convert('RGB')
         return self.clean_transform(image_pil), self.aug_transform(image_pil), label
 
+# ADDED: Weight loading function
+def load_pretrained_weights(model, weights_path):
+    print(f"--> Loading base FERPlus weights from: {weights_path}")
+    state_dict = torch.load(weights_path)
+    
+    targets = ['.head.', 'aux_global_head', 'aux_local_head']
+    keys_to_delete = [k for k in state_dict.keys() if any(t in k for t in targets)]
+    
+    print(f"--> Stripping {len(keys_to_delete)} mismatching 8-class head tensors...")
+    for k in keys_to_delete:
+        del state_dict[k]
+        
+    model.load_state_dict(state_dict, strict=False)
+    print("--> Successfully injected pre-trained facial geometry.")
+    return model
+
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*70}\nStarting Pure RAF-DB Training with NLA Framework\n{'='*70}")
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # Data Loading (Strictly RAF-DB)
     raf_train = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     train_dataset = DualViewDataset(raf_train)
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
@@ -74,14 +89,19 @@ def train():
 
     print(f"--> Training strictly on RAF-DB dataset: {len(raf_train)} images.")
 
-    # Model & Loss Initialization
     model = FRITNet(num_classes=7, transformer_depth=2).to(device)
+    
+    # ADDED: Load FERPlus weights before starting
+    if os.path.exists(FERPLUS_WEIGHTS):
+        model = load_pretrained_weights(model, FERPLUS_WEIGHTS)
+    else:
+        print("WARNING: FERPlus weights not found! Training from scratch.")
+
     criterion = NAWLoss(num_classes=7, total_epochs=EPOCHS, lambda_param=0.5).to(device)
 
     for param in model.backbone.parameters():
         param.requires_grad = True
 
-    # Differential Learning Rates
     optimizer = optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': BASE_LR * 0.1},
         {'params': model.lfa.parameters(), 'lr': BASE_LR},
@@ -99,6 +119,10 @@ def train():
         criterion.set_epoch(epoch)
         model.train()
         
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [NLA Active]")
         for imgs_orig, imgs_aug, labels in pbar:
             imgs_orig, imgs_aug, labels = imgs_orig.to(device), imgs_aug.to(device), labels.to(device)
@@ -111,9 +135,18 @@ def train():
             loss.backward()
             optimizer.step()
             
+            # ADDED: Track training accuracy
+            targets_idx = labels - 1 if labels.min() >= 1 else labels
+            _, predicted = torch.max(logits_orig.data, 1)
+            train_total += targets_idx.size(0)
+            train_correct += (predicted == targets_idx).sum().item()
+            
+            train_loss += loss.item()
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
         scheduler.step()
+
+        t_acc = train_correct / train_total
 
         # Validation Phase
         model.eval()
@@ -123,7 +156,7 @@ def train():
         with torch.no_grad():
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
-                targets = labels - 1
+                targets = labels - 1 if labels.min() >= 1 else labels
 
                 logits, _, _, _ = model(images)
                 _, predicted = torch.max(logits.data, 1)
@@ -135,7 +168,9 @@ def train():
 
         v_acc = val_correct / val_total
         macro_recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
-        print(f"Epoch {epoch+1}: Val Accuracy: {v_acc:.4f} | Macro Recall: {macro_recall:.4f}")
+        
+        # UPDATED: Print both Train and Val accuracy
+        print(f"Epoch {epoch+1}: Train Acc: {t_acc:.4f} | Val Acc: {v_acc:.4f} | Macro Recall: {macro_recall:.4f}")
 
         if v_acc > best_val_acc:
             best_val_acc = v_acc
