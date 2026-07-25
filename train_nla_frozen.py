@@ -20,7 +20,7 @@ BASE_LR = 1e-4
 WEIGHT_DECAY = 1e-2  
 PATIENCE = 10         
 SAVE_DIR = "/content/drive/MyDrive/FER_NLA_Results"
-UNIQUE_WEIGHT_NAME = "best_frit_nla_frozen_1k5.pth" # Updated unique name
+UNIQUE_WEIGHT_NAME = "best_frit_nla_unfrozen_choked.pth"
 
 # Colab Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -37,7 +37,7 @@ class PseudoLabelDataset(Dataset):
     def __init__(self, csv_file, top_k=1500):
         df = pd.read_csv(csv_file)
         
-        # IMPLEMENTED FIX: Sort by confidence and strictly extract the top 1,500
+        # Filter strictly to top-k highest-confidence samples
         if 'confidence' in df.columns:
             self.data = df.sort_values(by='confidence', ascending=False).head(top_k).reset_index(drop=True)
             print(f"--> Filtered AffectNet pseudo-labels to exactly {len(self.data)} highest-confidence samples.")
@@ -54,16 +54,19 @@ class PseudoLabelDataset(Dataset):
         image_pil = Image.open(img_path).convert('RGB')
         return image_pil, label
 
+
 class DualViewDataset(Dataset):
     def __init__(self, base_dataset):
         self.base_dataset = base_dataset
         
+        # Clean view
         self.clean_transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
+        # Non-spatial augmented view (Protects asymmetric LFA, adds occlusion)
         self.aug_transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
@@ -77,16 +80,14 @@ class DualViewDataset(Dataset):
         return len(self.base_dataset)
 
     def __getitem__(self, idx):
-        raw_data = self.base_dataset[idx]
-        
         if isinstance(self.base_dataset, ConcatDataset):
             dataset_idx = self.base_dataset.cumulative_sizes
-            if idx < dataset_idx[0]:  
+            if idx < dataset_idx[0]:  # RAF-DB
                 img_name = str(self.base_dataset.datasets[0].annotations.iloc[idx, 0])
                 label = int(self.base_dataset.datasets[0].annotations.iloc[idx, 1])
                 img_path = os.path.join(self.base_dataset.datasets[0].root_dir, str(label), img_name)
                 image_pil = Image.open(img_path).convert('RGB')
-            else:  
+            else:  # AffectNet Pseudo-labels
                 image_pil, label = self.base_dataset.datasets[1][idx - dataset_idx[0]]
         else:
             img_name = str(self.base_dataset.annotations.iloc[idx, 0])
@@ -114,11 +115,13 @@ def load_pretrained_weights(model, weights_path):
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*75}\nStarting NLA Framework | Frozen Backbone + 1.5k AffectNet\n{'='*75}")
+    print(f"\n{'='*75}\nStarting NLA Framework | Unfrozen Choked Backbone (1e-6) + 1.5k AffectNet\n{'='*75}")
     os.makedirs(SAVE_DIR, exist_ok=True)
 
+    # Load Base Dataset
     raf_train = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     
+    # Load and Concatenate Pseudo-Labels
     if os.path.exists(AFFECTNET_CSV):
         print("--> Injecting AffectNet pseudo-labels into training pool.")
         affectnet_train = PseudoLabelDataset(csv_file=AFFECTNET_CSV, top_k=1500)
@@ -144,15 +147,19 @@ def train():
 
     criterion = NAWLoss(num_classes=7, total_epochs=EPOCHS, lambda_param=0.5).to(device)
 
-    print("--> Freezing FaceNet Backbone...")
+    # ==========================================
+    # UNFREEZING BACKBONE WITH LR CHOKE
+    # ==========================================
+    print("--> Unfreezing FaceNet Backbone with extreme LR choke (1e-6)...")
     for param in model.backbone.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
     
-    print("--> Unfreezing LFA, SAFM, Transformer, and Classification Heads...")
     unfrozen_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"--> Total trainable parameters: {unfrozen_params:,}")
 
+    # Backbone learning rate choked strictly to 1e-6 (BASE_LR * 0.01)
     optimizer = optim.AdamW([
+        {'params': model.backbone.parameters(), 'lr': BASE_LR * 0.01}, 
         {'params': model.lfa.parameters(), 'lr': BASE_LR},
         {'params': model.safm.parameters(), 'lr': BASE_LR},
         {'params': model.transformer.parameters(), 'lr': BASE_LR},
@@ -177,6 +184,7 @@ def train():
         for imgs_orig, imgs_aug, labels in pbar:
             imgs_orig, imgs_aug, labels = imgs_orig.to(device), imgs_aug.to(device), labels.to(device)
             
+            # 1-indexed (1-7) to 0-indexed (0-6) conversion
             targets_idx = labels - 1
             
             optimizer.zero_grad()
@@ -197,6 +205,7 @@ def train():
         scheduler.step()
         t_acc = train_correct / train_total
 
+        # Validation Phase
         model.eval()
         val_correct, val_total = 0, 0
         all_preds, all_targets = [], []
@@ -219,6 +228,7 @@ def train():
         
         print(f"Epoch {epoch+1}: Train Acc: {t_acc:.4f} | Val Acc: {v_acc:.4f} | Macro Recall: {macro_recall:.4f}")
 
+        # Checkpointing based on Macro Recall
         if macro_recall > best_macro_recall:
             best_macro_recall = macro_recall
             best_val_acc = v_acc
