@@ -20,7 +20,7 @@ BASE_LR = 1e-4
 WEIGHT_DECAY = 1e-2  
 PATIENCE = 10         
 SAVE_DIR = "/content/drive/MyDrive/FER_NLA_Results"
-UNIQUE_WEIGHT_NAME = "best_frit_nla_frozen_affectnet.pth"
+UNIQUE_WEIGHT_NAME = "best_frit_nla_frozen_1k5.pth" # Updated unique name
 
 # Colab Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -34,14 +34,21 @@ FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressiv
 
 # --- Datasets & Wrappers ---
 class PseudoLabelDataset(Dataset):
-    def __init__(self, csv_file):
-        self.data = pd.read_csv(csv_file)
+    def __init__(self, csv_file, top_k=1500):
+        df = pd.read_csv(csv_file)
+        
+        # IMPLEMENTED FIX: Sort by confidence and strictly extract the top 1,500
+        if 'confidence' in df.columns:
+            self.data = df.sort_values(by='confidence', ascending=False).head(top_k).reset_index(drop=True)
+            print(f"--> Filtered AffectNet pseudo-labels to exactly {len(self.data)} highest-confidence samples.")
+        else:
+            self.data = df.head(top_k).reset_index(drop=True)
+            print(f"--> 'confidence' column not found. Took first {len(self.data)} samples.")
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        # Your pseudo_label.py saved full paths under 'file_path' and 1-7 labels under 'label'
         img_path = self.data.iloc[idx]['file_path']
         label = int(self.data.iloc[idx]['label']) 
         image_pil = Image.open(img_path).convert('RGB')
@@ -70,22 +77,18 @@ class DualViewDataset(Dataset):
         return len(self.base_dataset)
 
     def __getitem__(self, idx):
-        # We need to handle both RAFDBDataset outputs and PseudoLabelDataset outputs
         raw_data = self.base_dataset[idx]
         
-        # RAFDB returns (tensor, label) because of its internal transforms, 
-        # but we need the raw PIL image. We bypass the internal transform here:
         if isinstance(self.base_dataset, ConcatDataset):
             dataset_idx = self.base_dataset.cumulative_sizes
-            if idx < dataset_idx[0]:  # It's from RAF-DB
+            if idx < dataset_idx[0]:  
                 img_name = str(self.base_dataset.datasets[0].annotations.iloc[idx, 0])
                 label = int(self.base_dataset.datasets[0].annotations.iloc[idx, 1])
                 img_path = os.path.join(self.base_dataset.datasets[0].root_dir, str(label), img_name)
                 image_pil = Image.open(img_path).convert('RGB')
-            else:  # It's from AffectNet (already returns PIL from our custom class)
+            else:  
                 image_pil, label = self.base_dataset.datasets[1][idx - dataset_idx[0]]
         else:
-            # Fallback if ConcatDataset isn't used
             img_name = str(self.base_dataset.annotations.iloc[idx, 0])
             label = int(self.base_dataset.annotations.iloc[idx, 1])
             img_path = os.path.join(self.base_dataset.root_dir, str(label), img_name)
@@ -101,7 +104,6 @@ def load_pretrained_weights(model, weights_path):
     targets = ['.head.', 'aux_global_head', 'aux_local_head']
     keys_to_delete = [k for k in state_dict.keys() if any(t in k for t in targets)]
     
-    print(f"--> Stripping {len(keys_to_delete)} mismatching 8-class head tensors...")
     for k in keys_to_delete:
         del state_dict[k]
         
@@ -112,16 +114,14 @@ def load_pretrained_weights(model, weights_path):
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*75}\nStarting NLA Framework | Frozen Backbone + AffectNet\n{'='*75}")
+    print(f"\n{'='*75}\nStarting NLA Framework | Frozen Backbone + 1.5k AffectNet\n{'='*75}")
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # Load Base Dataset
     raf_train = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
     
-    # Load and Concatenate Pseudo-Labels
     if os.path.exists(AFFECTNET_CSV):
         print("--> Injecting AffectNet pseudo-labels into training pool.")
-        affectnet_train = PseudoLabelDataset(csv_file=AFFECTNET_CSV)
+        affectnet_train = PseudoLabelDataset(csv_file=AFFECTNET_CSV, top_k=1500)
         combined_train = ConcatDataset([raf_train, affectnet_train])
     else:
         print("--> WARNING: AffectNet CSV not found. Proceeding with RAF-DB only.")
@@ -144,9 +144,6 @@ def train():
 
     criterion = NAWLoss(num_classes=7, total_epochs=EPOCHS, lambda_param=0.5).to(device)
 
-    # ==========================================
-    # FREEZING THE BACKBONE
-    # ==========================================
     print("--> Freezing FaceNet Backbone...")
     for param in model.backbone.parameters():
         param.requires_grad = False
@@ -155,7 +152,6 @@ def train():
     unfrozen_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"--> Total trainable parameters: {unfrozen_params:,}")
 
-    # Backbone is explicitly removed from optimizer parameter groups
     optimizer = optim.AdamW([
         {'params': model.lfa.parameters(), 'lr': BASE_LR},
         {'params': model.safm.parameters(), 'lr': BASE_LR},
@@ -181,7 +177,6 @@ def train():
         for imgs_orig, imgs_aug, labels in pbar:
             imgs_orig, imgs_aug, labels = imgs_orig.to(device), imgs_aug.to(device), labels.to(device)
             
-            # 1-indexed to 0-indexed conversion
             targets_idx = labels - 1
             
             optimizer.zero_grad()
@@ -202,7 +197,6 @@ def train():
         scheduler.step()
         t_acc = train_correct / train_total
 
-        # Validation Phase
         model.eval()
         val_correct, val_total = 0, 0
         all_preds, all_targets = [], []
@@ -225,7 +219,6 @@ def train():
         
         print(f"Epoch {epoch+1}: Train Acc: {t_acc:.4f} | Val Acc: {v_acc:.4f} | Macro Recall: {macro_recall:.4f}")
 
-        # Checkpointing
         if macro_recall > best_macro_recall:
             best_macro_recall = macro_recall
             best_val_acc = v_acc
