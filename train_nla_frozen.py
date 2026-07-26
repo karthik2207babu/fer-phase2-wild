@@ -1,6 +1,7 @@
 import torch
+import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, ConcatDataset, Dataset
+from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
 from tqdm import tqdm
 import os
@@ -15,12 +16,13 @@ from loss import NAWLoss
 
 # --- Configuration ---
 BATCH_SIZE = 64
-EPOCHS = 50           
-BASE_LR = 1e-4
-WEIGHT_DECAY = 1e-2  
-PATIENCE = 10         
+EPOCHS = 15           # cRT converges very fast
+LEARNING_RATE = 1e-4
 SAVE_DIR = "/content/drive/MyDrive/FER_NLA_Results"
-UNIQUE_WEIGHT_NAME = "best_frit_nla_unfrozen_choked.pth"
+
+# Use the Model Soup weights that produced the 88.66% cRT baseline
+BASE_WEIGHTS = "/content/drive/MyDrive/RAFDB_Results/averaged_models_init.pth"
+UNIQUE_WEIGHT_NAME = "best_rafdb_naw_crt.pth"
 
 # Colab Paths
 BASE_PATH = "/content/data/Datasets/RAF-DB"
@@ -29,44 +31,18 @@ VAL_CSV = os.path.join(BASE_PATH, "test_labels.csv")
 TRAIN_ROOT = os.path.join(BASE_PATH, "DATASET", "train")
 VAL_ROOT = os.path.join(BASE_PATH, "DATASET", "test")
 
-AFFECTNET_CSV = "/content/drive/MyDrive/pseudo_labeled_affectnet.csv"
-FERPLUS_WEIGHTS = "/content/drive/MyDrive/FERPlus_Results/best_ferplus_aggressive.pth"
 
-# --- Datasets & Wrappers ---
-class PseudoLabelDataset(Dataset):
-    def __init__(self, csv_file, top_k=1500):
-        df = pd.read_csv(csv_file)
-        
-        # Filter strictly to top-k highest-confidence samples
-        if 'confidence' in df.columns:
-            self.data = df.sort_values(by='confidence', ascending=False).head(top_k).reset_index(drop=True)
-            print(f"--> Filtered AffectNet pseudo-labels to exactly {len(self.data)} highest-confidence samples.")
-        else:
-            self.data = df.head(top_k).reset_index(drop=True)
-            print(f"--> 'confidence' column not found. Took first {len(self.data)} samples.")
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_path = self.data.iloc[idx]['file_path']
-        label = int(self.data.iloc[idx]['label']) 
-        image_pil = Image.open(img_path).convert('RGB')
-        return image_pil, label
-
-
+# --- Dual-View Dataset Wrapper (RAF-DB Only) ---
 class DualViewDataset(Dataset):
     def __init__(self, base_dataset):
         self.base_dataset = base_dataset
         
-        # Clean view
         self.clean_transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-        # Non-spatial augmented view (Protects asymmetric LFA, adds occlusion)
         self.aug_transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
@@ -80,112 +56,72 @@ class DualViewDataset(Dataset):
         return len(self.base_dataset)
 
     def __getitem__(self, idx):
-        if isinstance(self.base_dataset, ConcatDataset):
-            dataset_idx = self.base_dataset.cumulative_sizes
-            if idx < dataset_idx[0]:  # RAF-DB
-                img_name = str(self.base_dataset.datasets[0].annotations.iloc[idx, 0])
-                label = int(self.base_dataset.datasets[0].annotations.iloc[idx, 1])
-                img_path = os.path.join(self.base_dataset.datasets[0].root_dir, str(label), img_name)
-                image_pil = Image.open(img_path).convert('RGB')
-            else:  # AffectNet Pseudo-labels
-                image_pil, label = self.base_dataset.datasets[1][idx - dataset_idx[0]]
-        else:
-            img_name = str(self.base_dataset.annotations.iloc[idx, 0])
-            label = int(self.base_dataset.annotations.iloc[idx, 1])
-            img_path = os.path.join(self.base_dataset.root_dir, str(label), img_name)
-            image_pil = Image.open(img_path).convert('RGB')
+        img_name = str(self.base_dataset.annotations.iloc[idx, 0])
+        label = int(self.base_dataset.annotations.iloc[idx, 1])
+        img_path = os.path.join(self.base_dataset.root_dir, str(label), img_name)
 
+        image_pil = Image.open(img_path).convert('RGB')
         return self.clean_transform(image_pil), self.aug_transform(image_pil), label
 
 
-def load_pretrained_weights(model, weights_path):
-    print(f"--> Loading base FERPlus weights from: {weights_path}")
-    state_dict = torch.load(weights_path)
-    
-    targets = ['.head.', 'aux_global_head', 'aux_local_head']
-    keys_to_delete = [k for k in state_dict.keys() if any(t in k for t in targets)]
-    
-    for k in keys_to_delete:
-        del state_dict[k]
-        
-    model.load_state_dict(state_dict, strict=False)
-    print("--> Successfully injected pre-trained facial geometry.")
-    return model
-
-
-def train():
+def train_naw_crt():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*75}\nStarting NLA Framework | Unfrozen Choked Backbone (1e-6) + 1.5k AffectNet\n{'='*75}")
+    print(f"\n{'='*75}\nStarting NAW-cRT | Frozen Representation + Ambiguity Classifier\n{'='*75}")
+    
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # Load Base Dataset
-    raf_train = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
+    # 1. Initialize Model and Load Soup Weights
+    model = FRITNet(num_classes=7, transformer_depth=2).to(device)
     
-    # Load and Concatenate Pseudo-Labels
-    if os.path.exists(AFFECTNET_CSV):
-        print("--> Injecting AffectNet pseudo-labels into training pool.")
-        affectnet_train = PseudoLabelDataset(csv_file=AFFECTNET_CSV, top_k=1500)
-        combined_train = ConcatDataset([raf_train, affectnet_train])
+    if os.path.exists(BASE_WEIGHTS):
+        print(f"--> Loading Soup weights from: {BASE_WEIGHTS}")
+        model.load_state_dict(torch.load(BASE_WEIGHTS, map_location=device), strict=False)
     else:
-        print("--> WARNING: AffectNet CSV not found. Proceeding with RAF-DB only.")
-        combined_train = raf_train
+        raise FileNotFoundError(f"Cannot find {BASE_WEIGHTS}. Run failed.")
+    
+    # 2. FREEZE EVERYTHING EXCEPT CLASSIFICATION HEADS
+    print("--> Freezing backbone, LFA, SAFM, and Transformers...")
+    for param in model.parameters():
+        param.requires_grad = False
+        
+    print("--> Unfreezing classification heads...")
+    unfrozen_params = 0
+    for name, param in model.named_parameters():
+        if any(keyword in name.lower() for keyword in ['fc', 'logit', 'classifier', 'head', 'main', 'aux', 'out']):
+            if 'attn' not in name.lower() and 'attention' not in name.lower() and 'norm' not in name.lower():
+                param.requires_grad = True
+                unfrozen_params += param.numel()
+                print(f"  [UNFROZEN] {name}")
+    
+    print(f"--> Total trainable parameters for NAW-cRT: {unfrozen_params:,}")
 
-    print(f"--> Total training images: {len(combined_train)}")
-
-    train_dataset = DualViewDataset(combined_train)
+    # 3. Load Pure RAF-DB Dataset (Standard Shuffle, NAW handles imbalance)
+    raf_train = RAFDBDataset(csv_file=TRAIN_CSV, root_dir=TRAIN_ROOT, phase='train')
+    train_dataset = DualViewDataset(raf_train)
     val_dataset = RAFDBDataset(csv_file=VAL_CSV, root_dir=VAL_ROOT, phase='val')
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    model = FRITNet(num_classes=7, transformer_depth=2).to(device)
-    
-    if os.path.exists(FERPLUS_WEIGHTS):
-        model = load_pretrained_weights(model, FERPLUS_WEIGHTS)
-    else:
-        print("WARNING: FERPlus weights not found! Training from scratch.")
-
+    # 4. NAW Loss and Optimizer
     criterion = NAWLoss(num_classes=7, total_epochs=EPOCHS, lambda_param=0.5).to(device)
 
-    # ==========================================
-    # UNFREEZING BACKBONE WITH LR CHOKE
-    # ==========================================
-    print("--> Unfreezing FaceNet Backbone with extreme LR choke (1e-6)...")
-    for param in model.backbone.parameters():
-        param.requires_grad = True
-    
-    unfrozen_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"--> Total trainable parameters: {unfrozen_params:,}")
-
-    # Backbone learning rate choked strictly to 1e-6 (BASE_LR * 0.01)
-    optimizer = optim.AdamW([
-        {'params': model.backbone.parameters(), 'lr': BASE_LR * 0.01}, 
-        {'params': model.lfa.parameters(), 'lr': BASE_LR},
-        {'params': model.safm.parameters(), 'lr': BASE_LR},
-        {'params': model.transformer.parameters(), 'lr': BASE_LR},
-        {'params': model.classifier.parameters(), 'lr': BASE_LR}
-    ], weight_decay=WEIGHT_DECAY)
-
+    # Only pass the unfrozen parameters to the optimizer
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     best_val_acc = 0.0
     best_macro_recall = 0.0
-    patience_counter = 0
 
     for epoch in range(EPOCHS):
         criterion.set_epoch(epoch)
         model.train()
+        train_loss, train_correct, train_total = 0.0, 0, 0
         
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
-        
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [NLA Active]")
+        pbar = tqdm(train_loader, desc=f"NAW-cRT Epoch {epoch+1}/{EPOCHS}")
         for imgs_orig, imgs_aug, labels in pbar:
             imgs_orig, imgs_aug, labels = imgs_orig.to(device), imgs_aug.to(device), labels.to(device)
-            
-            # 1-indexed (1-7) to 0-indexed (0-6) conversion
-            targets_idx = labels - 1
+            targets_idx = labels - 1 
             
             optimizer.zero_grad()
             logits_orig, _, aux_g, aux_l = model(imgs_orig)
@@ -196,10 +132,10 @@ def train():
             optimizer.step()
             
             _, predicted = torch.max(logits_orig.data, 1)
-            train_total += targets_idx.size(0)
             train_correct += (predicted == targets_idx).sum().item()
-            
+            train_total += targets_idx.size(0)
             train_loss += loss.item()
+            
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
         scheduler.step()
@@ -209,17 +145,18 @@ def train():
         model.eval()
         val_correct, val_total = 0, 0
         all_preds, all_targets = [], []
-
+        
         with torch.no_grad():
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
                 targets_idx = labels - 1
-
+                
                 logits, _, _, _ = model(images)
                 _, predicted = torch.max(logits.data, 1)
-
+                
                 val_total += targets_idx.size(0)
                 val_correct += (predicted == targets_idx).sum().item()
+                
                 all_preds.extend(predicted.cpu().numpy())
                 all_targets.extend(targets_idx.cpu().numpy())
 
@@ -228,23 +165,12 @@ def train():
         
         print(f"Epoch {epoch+1}: Train Acc: {t_acc:.4f} | Val Acc: {v_acc:.4f} | Macro Recall: {macro_recall:.4f}")
 
-        # Checkpointing based on Macro Recall
-        if macro_recall > best_macro_recall:
-            best_macro_recall = macro_recall
+        # Save on Best Accuracy 
+        if v_acc > best_val_acc:
             best_val_acc = v_acc
-            patience_counter = 0
+            best_macro_recall = macro_recall
             torch.save(model.state_dict(), os.path.join(SAVE_DIR, UNIQUE_WEIGHT_NAME))
-            print(f"--> Saved new best NLA weights based on Macro Recall: {macro_recall:.4f} (Val Acc: {v_acc:.4f})")
-        else:
-            patience_counter += 1
-            print(f"--> No improvement in Macro Recall for {patience_counter}/{PATIENCE} epochs.")
-
-        if patience_counter >= PATIENCE:
-            print(f"\n===================================")
-            print(f"Early stopping triggered at Epoch {epoch+1}.")
-            print(f"Best Macro Recall: {best_macro_recall:.4f} | Corresponding Val Acc: {best_val_acc:.4f}")
-            print(f"===================================")
-            break
+            print(f"--> Saved new best NAW-cRT weights: Acc = {v_acc:.4f}, Recall = {macro_recall:.4f}")
 
 if __name__ == "__main__":
-    train()
+    train_naw_crt()
