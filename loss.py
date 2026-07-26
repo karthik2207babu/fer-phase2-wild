@@ -11,34 +11,36 @@ class NAWLoss(nn.Module):
         self.lambda_param = lambda_param
         self.current_epoch = 0
 
-        # Mean vectors for True and False predictions
-        self.mu_true = torch.tensor([0.5, 0.5])
-        self.mu_false = torch.tensor([0.3, 0.15])
+        # RECALIBRATED for L2Norm + s=30 head (was [0.5,0.5] / [0.3,0.15])
+        # True branch: confidently-correct samples sit near (0.8-0.9, 0.1-0.2), not (0.5,0.5)
+        self.mu_true = torch.tensor([0.8, 0.15])
+        # False branch: confidently-wrong samples are the mirror — high p_NN, low p_GT
+        self.mu_false = torch.tensor([0.15, 0.8])
 
     def set_epoch(self, epoch):
         self.current_epoch = epoch
 
     def _compute_naw_weights(self, p_gt, p_nn, device):
-        # Dynamic Covariance Scheduler
         e = float(self.current_epoch)
         E = float(max(1, self.total_epochs))
         cs = max(1.0 - math.exp(-10.0 * (e / E)), 1e-4)
 
-        # FIX BUG 1: Keep diagonal fixed [0.8, 0.4], scale ONLY off-diagonal terms by cs
+        # RECALIBRATED: tighter diagonal (0.15 vs paper's 0.8/0.4) so the bump doesn't
+        # spread across the whole saturated 0-1 range and swallow easy examples too.
         cov_true = torch.tensor([
-            [0.8, 0.2 * cs],
-            [0.2 * cs, 0.4]
+            [0.15, 0.05 * cs],
+            [0.05 * cs, 0.15]
         ], device=device)
 
         cov_false = torch.tensor([
-            [0.8, 0.1],
-            [0.1, 0.15]
+            [0.15, 0.05],
+            [0.05, 0.15]
         ], device=device)
 
         inv_cov_true = torch.linalg.pinv(cov_true)
         inv_cov_false = torch.linalg.pinv(cov_false)
 
-        points = torch.stack([p_gt, p_nn], dim=1) 
+        points = torch.stack([p_gt, p_nn], dim=1)
         is_true = (p_gt >= p_nn)
 
         weights = torch.zeros_like(p_gt)
@@ -65,8 +67,6 @@ class NAWLoss(nn.Module):
 
     def forward(self, logits, targets, aux_global=None, aux_local=None, logits_aug=None):
         probs = F.softmax(logits, dim=1)
-        
-        # FIX BUG 2: Expect targets to arrive cleanly 0-indexed (0 to num_classes - 1)
         targets_idx = targets
 
         p_gt = probs.gather(1, targets_idx.unsqueeze(1)).squeeze(1)
@@ -75,6 +75,13 @@ class NAWLoss(nn.Module):
         p_nn = probs[mask].view(probs.size(0), self.num_classes - 1).max(dim=1)[0]
 
         w_star = self._compute_naw_weights(p_gt, p_nn, logits.device)
+
+        # DEBUG: confirm the head's real distribution + whether the Gaussian is now
+        # actually firing. Remove once confirmed.
+        if self.current_epoch == 0:
+            print(f"[DEBUG] p_gt mean={p_gt.mean().item():.3f} p_nn mean={p_nn.mean().item():.3f} "
+                  f"w_star mean={w_star.mean().item():.3f} w_star max={w_star.max().item():.3f}")
+
         ce_loss = F.cross_entropy(logits, targets_idx, reduction='none')
         l_naw_ce = ((1.0 + w_star) * ce_loss).mean()
 
