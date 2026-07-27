@@ -52,7 +52,9 @@ class FRITNet(nn.Module):
         )
         
         # 4. L2-Normalized Classification Head
-        self.classifier = L2NormLinear(in_features=128, out_features=num_classes, scale=30.0)
+        # self.classifier = L2NormLinear(in_features=128, out_features=num_classes, scale=30.0)
+        # 4. Standard Linear Classification Head (No L2 Normalization)
+        self.classifier = nn.Linear(128, num_classes)
 
     def forward(self, x):
         x = self.backbone(x)     
