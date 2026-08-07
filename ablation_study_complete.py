@@ -1,3 +1,4 @@
+# ablation_study_complete.py
 import argparse
 import os
 import random
@@ -19,7 +20,7 @@ from dataset import RAFDBDataset
 from lfa import LFAModule
 from safm import SAFM
 from transformer import FRITTransformer
-from loss import NAWLoss, CombinedFERLoss   # we'll use NAWLoss for one variant
+from loss import NAWLoss   # only NAWLoss is available
 
 SEED = 42
 BATCH_SIZE = 64
@@ -73,7 +74,7 @@ class LFAOnly(nn.Module):
         super().__init__()
         self.backbone = TruncatedFaceNet(pretrained='vggface2', freeze_early_layers=True)
         self.lfa = LFAModule(in_channels=1792, out_channels=128)
-        self.classifier = nn.Linear(128, NUM_CLASSES)  # global pool after LFA output?
+        self.classifier = nn.Linear(128, NUM_CLASSES)
 
     def forward(self, x):
         x = self.backbone(x)
@@ -177,8 +178,7 @@ def train_variant(name, model_class, train_loader, val_loader, save_dir, epochs,
             logits = model(images)
 
             if use_nla:
-                # NLA expects (logits, targets) and returns loss; it also expects aux outputs?
-                # We'll just use the main logits for simplicity.
+                # NAWLoss expects (logits, targets) – no aux needed for ablation
                 loss = criterion(logits, targets)
             else:
                 loss = criterion(logits, targets)
@@ -299,8 +299,8 @@ def main():
         ("LFA_SAFM_NoTrans", LFA_SAFM_NoTransformer, False),
         ("FRITNet_Full", FRITNetFull, False),
         ("FRITNet_Deep", FRITNetDeep, False),
-        ("FRITNet_Full_NLA", FRITNetFull, True),          # NLA loss
-        ("FRITNet_Deep_NLA", FRITNetDeep, True),         # deep + NLA
+        ("FRITNet_Full_NLA", FRITNetFull, True),
+        ("FRITNet_Deep_NLA", FRITNetDeep, True),
     ]
 
     results = []
