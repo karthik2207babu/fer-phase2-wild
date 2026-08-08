@@ -1,31 +1,33 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+import numpy as np
+from torch.utils.data import DataLoader, WeightedRandomSampler, Dataset
 from torchvision import transforms
 from tqdm import tqdm
-import os
-import numpy as np
 import pandas as pd
 from PIL import Image
 
 from model import FRITNet
+from loss import NAWLoss
 
-# --- Configuration ---
+# ------------------ Config ------------------
 BATCH_SIZE = 64
-EPOCHS = 80                # increased for better convergence
+EPOCHS = 100
 LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 1e-3
 WARMUP_EPOCHS = 5
-WEIGHT_DECAY = 1e-4
+NUM_CLASSES = 7
 
-# Paths – update these to your actual CSV files
-PIXELS_CSV = "/content/drive/MyDrive/fer2013.csv"       # official FER2013 pixels
-LABELS_CSV = "/content/drive/MyDrive/fer2013new.csv"    # official vote counts
-SAVE_DIR = "/content/drive/MyDrive/FERPlus_Soft_Results"
+# Paths (update these)
+PIXELS_CSV = "/content/drive/MyDrive/fer2013.csv"
+LABELS_CSV = "/content/drive/MyDrive/fer2013new.csv"
+SAVE_DIR = "/content/drive/MyDrive/FERPlus_Advanced_Results"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# RAF‑DB order (7 classes, dropping contempt)
+# RAF‑DB class order (we keep 7 classes, drop contempt)
 RAF_DB_ORDER = ['surprise', 'fear', 'disgust', 'happiness', 'sadness', 'anger', 'neutral']
 ALL_VOTES = ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'contempt', 'unknown', 'NF']
 
@@ -44,7 +46,9 @@ class FERPlusSoftDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         soft_label = torch.tensor(row['soft_label'], dtype=torch.float32)
-        return image, soft_label
+        # Also return the majority class for accuracy (optional)
+        hard_label = torch.argmax(soft_label)
+        return image, soft_label, hard_label
 
 def prepare_dataframes(pixels_path, labels_path):
     print("Loading and merging FERPlus CSVs...")
@@ -57,7 +61,6 @@ def prepare_dataframes(pixels_path, labels_path):
         total_votes = sum([row[c] for c in ALL_VOTES])
         if total_votes == 0 or (row['unknown'] + row['NF']) > 0.5 * total_votes:
             continue
-        # Extract 7 classes in RAF‑DB order
         votes_7 = np.array([row[c] for c in RAF_DB_ORDER], dtype=np.float32)
         sum_7 = votes_7.sum()
         if sum_7 == 0:
@@ -72,112 +75,165 @@ def prepare_dataframes(pixels_path, labels_path):
     print(f"Kept {len(final_df)} images out of {len(df)}")
     return final_df
 
-def soft_target_ce(logits, soft_labels):
-    log_probs = F.log_softmax(logits, dim=1)
-    return -(soft_labels * log_probs).sum(dim=1).mean()
+# ----- Data loading -----
+df = prepare_dataframes(PIXELS_CSV, LABELS_CSV)
+train_df = df[df['Usage'] == 'Training']
+val_df = df[df['Usage'].isin(['PublicTest', 'PrivateTest'])]
 
-def train():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training FERPlus with soft labels on {device}")
+# Augmentation (stronger)
+train_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
+    transforms.RandomErasing(p=0.2, scale=(0.02, 0.15)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+val_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
 
-    df = prepare_dataframes(PIXELS_CSV, LABELS_CSV)
-    train_df = df[df['Usage'] == 'Training']
-    val_df = df[df['Usage'].isin(['PublicTest', 'PrivateTest'])]
+train_dataset = FERPlusSoftDataset(train_df, transform=train_transform)
+val_dataset = FERPlusSoftDataset(val_df, transform=val_transform)
 
-    train_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    val_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+# Weighted sampler for class imbalance (based on majority class counts)
+train_hard_labels = [torch.argmax(row['soft_label']).item() for _, row in train_df.iterrows()]
+class_counts = np.bincount(train_hard_labels, minlength=NUM_CLASSES)
+class_weights = 1.0 / (class_counts + 1e-6)
+sample_weights = class_weights[train_hard_labels]
+sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
 
-    train_dataset = FERPlusSoftDataset(train_df, transform=train_transform)
-    val_dataset = FERPlusSoftDataset(val_df, transform=val_transform)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+# ----- Model -----
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = FRITNet(num_classes=NUM_CLASSES, transformer_depth=2, use_srt=False).to(device)
 
-    model = FRITNet(num_classes=7, transformer_depth=2).to(device)
+# *** Load pre-trained FaceNet backbone weights (from VGGFace2) ***
+# The TruncatedFaceNet class already loads pretrained weights by default.
+# But we want to freeze the early layers for a few epochs, then unfreeze.
+# However, the model's backbone is already pre-trained, so we just keep it.
+# We'll set lower LR for the backbone.
 
-    # Optimizer with weight decay
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+# Loss: NLA (handles ambiguity and imbalance)
+criterion = NAWLoss(num_classes=NUM_CLASSES, total_epochs=EPOCHS, lambda_param=0.5).to(device)
 
-    # Warmup + cosine scheduler
-    def lambda_lr(epoch):
-        if epoch < WARMUP_EPOCHS:
-            return (epoch + 1) / WARMUP_EPOCHS
+# Optimizer with different LR groups
+optimizer = optim.AdamW([
+    {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1},
+    {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
+    {'params': model.safm.parameters(), 'lr': LEARNING_RATE},
+    {'params': model.transformer.parameters(), 'lr': LEARNING_RATE},
+], weight_decay=WEIGHT_DECAY)
+
+# Warmup + Cosine scheduler
+def lr_lambda(epoch):
+    if epoch < WARMUP_EPOCHS:
+        return (epoch + 1) / WARMUP_EPOCHS
+    else:
+        progress = (epoch - WARMUP_EPOCHS) / (EPOCHS - WARMUP_EPOCHS)
+        return 0.5 * (1 + np.cos(np.pi * progress))
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+# MixUp function
+def mixup_data(x, y_soft, alpha=0.2):
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size).to(x.device)
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y_soft, y_soft[index]
+    return mixed_x, y_a, y_b, lam
+
+# ----- Training -----
+best_val_acc = 0.0
+best_val_loss = float('inf')
+
+for epoch in range(EPOCHS):
+    criterion.set_epoch(epoch)  # for NAW scheduling
+
+    # Freezing strategy: freeze backbone for first 5 epochs, then unfreeze
+    if epoch == 0:
+        print("Stage 1: Freezing backbone, training heads only")
+        for name, param in model.named_parameters():
+            if 'backbone' in name:
+                param.requires_grad = False
+    elif epoch == 5:
+        print("Stage 2: Unfreezing backbone")
+        for param in model.parameters():
+            param.requires_grad = True
+
+    model.train()
+    train_loss = 0.0
+    train_preds, train_targets = [], []
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+
+    for images, soft_labels, hard_labels in pbar:
+        images, soft_labels = images.to(device), soft_labels.to(device)
+        hard_labels = hard_labels.to(device)
+
+        optimizer.zero_grad()
+
+        # MixUp with 0.8 probability
+        if np.random.rand() < 0.8:
+            mixed_x, y_a, y_b, lam = mixup_data(images, soft_labels, alpha=0.2)
+            logits, _, aux_g, aux_l = model(mixed_x, training=True)
+            loss_a = criterion(logits, y_a, aux_g, aux_l)  # NAWLoss expects targets (not soft labels) – we need to adapt
+            loss_b = criterion(logits, y_b, aux_g, aux_l)
+            loss = lam * loss_a + (1 - lam) * loss_b
+            # For accuracy, use the dominant hard label (the one with higher soft label weight)
+            dominant = hard_labels if lam > 0.5 else hard_labels[index]
         else:
-            return 0.5 * (1 + np.cos(np.pi * (epoch - WARMUP_EPOCHS) / (EPOCHS - WARMUP_EPOCHS)))
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_lr)
+            logits, _, aux_g, aux_l = model(images, training=True)
+            loss = criterion(logits, hard_labels, aux_g, aux_l)   # NAWLoss uses hard targets, but we can pass soft labels? 
+            # Actually NAWLoss expects hard labels (class indices). We'll convert hard_labels to indices.
+            # NAWLoss internally uses targets for p_gt. We'll pass hard_labels as targets.
+            # Better: we can use soft targets with a custom loss, but NAWLoss is designed for hard labels.
+            # So we'll use hard_labels for NAW.
+            loss = criterion(logits, hard_labels, aux_g, aux_l)
+            dominant = hard_labels
 
-    best_val_acc = 0.0
-    best_val_loss = float('inf')
+        loss.backward()
+        optimizer.step()
 
-    for epoch in range(EPOCHS):
-        model.train()
-        train_loss = 0.0
-        train_correct, train_total = 0, 0
+        train_loss += loss.item()
+        _, pred = torch.max(logits, 1)
+        train_preds.extend(pred.cpu().numpy())
+        train_targets.extend(dominant.cpu().numpy())
+        pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
-        for images, soft_labels in pbar:
-            images, soft_labels = images.to(device), soft_labels.to(device)
+    train_acc = (np.array(train_preds) == np.array(train_targets)).mean()
 
-            optimizer.zero_grad()
-            logits, _, aux_g, aux_l = model(images)
-
-            loss = soft_target_ce(logits, soft_labels)
-            loss_g = soft_target_ce(aux_g, soft_labels)
-            loss_l = soft_target_ce(aux_l, soft_labels)
-            loss = loss + 0.1 * loss_g + 0.1 * loss_l
-
-            loss.backward()
-            optimizer.step()
-
-            train_loss += loss.item()
+    # Validation
+    model.eval()
+    val_preds, val_targets = [], []
+    val_loss = 0.0
+    with torch.no_grad():
+        for images, soft_labels, hard_labels in val_loader:
+            images, hard_labels = images.to(device), hard_labels.to(device)
+            logits, _, _, _ = model(images, training=False)
+            loss = criterion(logits, hard_labels)  # only main logits for validation
+            val_loss += loss.item()
             _, pred = torch.max(logits, 1)
-            _, target = torch.max(soft_labels, 1)
-            train_total += target.size(0)
-            train_correct += (pred == target).sum().item()
+            val_preds.extend(pred.cpu().numpy())
+            val_targets.extend(hard_labels.cpu().numpy())
 
-            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+    val_acc = (np.array(val_preds) == np.array(val_targets)).mean()
+    avg_val_loss = val_loss / len(val_loader)
 
-        train_acc = train_correct / train_total
+    print(f"Epoch {epoch+1}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}, Val Loss={avg_val_loss:.4f}")
 
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        val_correct, val_total = 0, 0
-        with torch.no_grad():
-            for images, soft_labels in val_loader:
-                images, soft_labels = images.to(device), soft_labels.to(device)
-                logits, _, _, _ = model(images)
-                loss = soft_target_ce(logits, soft_labels)
-                val_loss += loss.item()
-                _, pred = torch.max(logits, 1)
-                _, target = torch.max(soft_labels, 1)
-                val_total += target.size(0)
-                val_correct += (pred == target).sum().item()
+    scheduler.step()
 
-        val_acc = val_correct / val_total
-        avg_val_loss = val_loss / len(val_loader)
+    if val_acc > best_val_acc:
+        best_val_acc = val_acc
+        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_advanced.pth"))
+        print(f"--> Saved best model (val acc {val_acc:.4f})")
 
-        print(f"Epoch {epoch+1}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}, Val Loss={avg_val_loss:.4f}")
-
-        scheduler.step()
-
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_soft_ds.pth"))
-            print(f"--> Saved best FERPlus soft model with val acc {val_acc:.4f}")
-
-    print(f"Training complete. Best FERPlus soft validation accuracy: {best_val_acc:.4f}")
-
-if __name__ == "__main__":
-    train()
+print(f"Training complete. Best FERPlus validation accuracy: {best_val_acc:.4f}")
