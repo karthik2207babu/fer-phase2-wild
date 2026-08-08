@@ -11,27 +11,23 @@ import pandas as pd
 from PIL import Image
 
 from model import FRITNet
-from transformer import FRITTransformer
+from loss import NAWLoss   # we'll adapt NAW to soft labels
 
 # ------------------ Config ------------------
 BATCH_SIZE = 64
-EPOCHS = 120
-LEARNING_RATE_BACKBONE = 1e-4          # Higher for SGD
-LEARNING_RATE_TRANSFORMER = 1e-3        # Higher for deeper transformer
-WEIGHT_DECAY = 5e-4                     # Moderate for SGD
-MOMENTUM = 0.9
+EPOCHS = 50
+LEARNING_RATE_BACKBONE = 1e-5
+LEARNING_RATE_OTHER = 5e-5
+WEIGHT_DECAY = 1e-4
 NUM_CLASSES = 7
-TRANSFORMER_DEPTH = 4
-DROPOUT = 0.5                           # Reduced slightly
-MIXUP_ALPHA = 0.2
-MIXUP_PROB = 0.8
-PATIENCE = 15
 
-# Paths
-PIXELS_CSV = "/content/drive/MyDrive/fer2013.csv"
-LABELS_CSV = "/content/drive/MyDrive/fer2013new.csv"
-SAVE_DIR = "/content/drive/MyDrive/FERPlus_Break_Plateau"
+# Paths to your best model from previous run
+CHECKPOINT_PATH = "/content/drive/MyDrive/FERPlus_Final_Results/best_ferplus_final.pth"
+SAVE_DIR = "/content/drive/MyDrive/FERPlus_FineTune_NLA"
 os.makedirs(SAVE_DIR, exist_ok=True)
+
+# (Same dataset and dataloader code as before – reuse)
+# I'll include it for completeness
 
 RAF_DB_ORDER = ['surprise', 'fear', 'disgust', 'happiness', 'sadness', 'anger', 'neutral']
 ALL_VOTES = ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'contempt', 'unknown', 'NF']
@@ -79,22 +75,9 @@ def prepare_dataframes(pixels_path, labels_path):
     print(f"Kept {len(final_df)} images out of {len(df)}")
     return final_df
 
-def soft_target_ce(logits, soft_labels):
-    log_probs = F.log_softmax(logits, dim=1)
-    return -(soft_labels * log_probs).sum(dim=1).mean()
-
-def mixup_data_soft(x, y_soft, alpha=MIXUP_ALPHA):
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-    batch_size = x.size(0)
-    index = torch.randperm(batch_size).to(x.device)
-    mixed_x = lam * x + (1 - lam) * x[index, :]
-    y_a, y_b = y_soft, y_soft[index]
-    return mixed_x, y_a, y_b, lam
-
-# ----- Data -----
+# ----- Data preparation -----
+PIXELS_CSV = "/content/drive/MyDrive/fer2013.csv"
+LABELS_CSV = "/content/drive/MyDrive/fer2013new.csv"
 df = prepare_dataframes(PIXELS_CSV, LABELS_CSV)
 train_df = df[df['Usage'] == 'Training']
 val_df = df[df['Usage'].isin(['PublicTest', 'PrivateTest'])]
@@ -128,80 +111,92 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler,
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
 print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
-print(f"Class counts in train: {class_counts}")
 
 # ----- Model -----
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = FRITNet(num_classes=NUM_CLASSES, transformer_depth=2).to(device)
 
-model = FRITNet(num_classes=NUM_CLASSES, transformer_depth=TRANSFORMER_DEPTH).to(device)
+# Load your best 84.24% checkpoint
+model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
+print("Loaded best previous model.")
 
-# Override transformer with dropout=0.5
-model.transformer = FRITTransformer(
-    embed_dim=128,
-    num_heads=8,
-    num_local_layers=TRANSFORMER_DEPTH,
-    num_classes=NUM_CLASSES,
-    dropout=DROPOUT
-).to(device)
+# ----- Loss: NAW adapted to soft labels -----
+# We'll use NAWLoss, but we need to pass hard labels (majority class) for NAW weighting.
+# We'll compute w_NAW from the majority class probability (p_gt) and nearest negative (p_nn).
+# Then we weight the soft-target CE loss.
+criterion_soft = nn.KLDivLoss(reduction='batchmean')  # actually we'll use our soft_target_ce
+# We'll create a wrapper that uses NAW weights
 
-# ----- Optimizer: SGD with Nesterov (higher LR) -----
-optimizer = optim.SGD([
+class NLA_SoftLoss(nn.Module):
+    def __init__(self, num_classes, total_epochs):
+        super().__init__()
+        self.naw = NAWLoss(num_classes=num_classes, total_epochs=total_epochs, lambda_param=0.5)
+        self.current_epoch = 0
+
+    def set_epoch(self, epoch):
+        self.current_epoch = epoch
+        self.naw.set_epoch(epoch)
+
+    def forward(self, logits, soft_labels, hard_labels):
+        # Compute NAW weights on hard labels
+        # NAWLoss expects (logits, targets) and returns a loss, but we need weights.
+        # We'll compute p_gt and p_nn manually, then use the NAW formula.
+        # For simplicity, we'll use the NAWLoss's internal method to compute weights.
+        # But NAWLoss doesn't expose weights directly. We can call _compute_naw_weights.
+        # However, that requires p_gt, p_nn. We can compute them from logits and hard_labels.
+        probs = F.softmax(logits, dim=1)
+        p_gt = probs.gather(1, hard_labels.unsqueeze(1)).squeeze(1)
+        mask = torch.ones_like(probs, dtype=torch.bool)
+        mask.scatter_(1, hard_labels.unsqueeze(1), False)
+        p_nn = probs[mask].view(probs.size(0), -1).max(dim=1)[0]
+        # Now compute NAW weights using the same formula as in NAWLoss
+        w_star = self.naw._compute_naw_weights(p_gt, p_nn, logits.device)
+        # Compute soft-target CE
+        log_probs = F.log_softmax(logits, dim=1)
+        soft_ce = -(soft_labels * log_probs).sum(dim=1)
+        # Weighted loss
+        loss = ((1.0 + w_star) * soft_ce).mean()
+        return loss
+
+loss_fn = NLA_SoftLoss(num_classes=NUM_CLASSES, total_epochs=EPOCHS).to(device)
+
+# Optimizer
+optimizer = optim.AdamW([
     {'params': model.backbone.parameters(), 'lr': LEARNING_RATE_BACKBONE},
-    {'params': model.lfa.parameters(), 'lr': LEARNING_RATE_TRANSFORMER * 0.5},
-    {'params': model.safm.parameters(), 'lr': LEARNING_RATE_TRANSFORMER * 0.5},
-    {'params': model.transformer.parameters(), 'lr': LEARNING_RATE_TRANSFORMER},
-], weight_decay=WEIGHT_DECAY, momentum=MOMENTUM, nesterov=True)
+    {'params': model.lfa.parameters(), 'lr': LEARNING_RATE_OTHER},
+    {'params': model.safm.parameters(), 'lr': LEARNING_RATE_OTHER},
+    {'params': model.transformer.parameters(), 'lr': LEARNING_RATE_OTHER},
+], weight_decay=WEIGHT_DECAY)
 
-# Warmup + Cosine scheduler (with higher initial LR)
-def lr_lambda(epoch):
-    if epoch < 5:
-        return (epoch + 1) / 5
-    else:
-        progress = (epoch - 5) / (EPOCHS - 5)
-        return 0.5 * (1 + np.cos(np.pi * progress))
-scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+# Cosine scheduler (no warmup needed for fine-tuning)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-# ----- Training -----
+# ----- Fine-tuning loop -----
 best_val_acc = 0.0
-epochs_no_improve = 0
-
 for epoch in range(EPOCHS):
-    # No freezing – backbone is trainable from epoch 1
-    if epoch == 0:
-        print("Training with backbone unfrozen from start (LR = 1e-4)")
-
+    loss_fn.set_epoch(epoch)
     model.train()
     train_loss = 0.0
     train_preds, train_targets = [], []
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
-
     for images, soft_labels, hard_labels in pbar:
         images, soft_labels = images.to(device), soft_labels.to(device)
         hard_labels = hard_labels.to(device)
 
-        if np.random.rand() < MIXUP_PROB:
-            mixed_x, y_a, y_b, lam = mixup_data_soft(images, soft_labels, alpha=MIXUP_ALPHA)
-            logits, _, aux_g, aux_l = model(mixed_x)
-            loss_a = soft_target_ce(logits, y_a) + 0.1 * soft_target_ce(aux_g, y_a) + 0.1 * soft_target_ce(aux_l, y_a)
-            loss_b = soft_target_ce(logits, y_b) + 0.1 * soft_target_ce(aux_g, y_b) + 0.1 * soft_target_ce(aux_l, y_b)
-            loss = lam * loss_a + (1 - lam) * loss_b
-            index = torch.randperm(images.size(0)).to(device)
-            dominant = hard_labels if lam > 0.5 else hard_labels[index]
-        else:
-            logits, _, aux_g, aux_l = model(images)
-            loss = soft_target_ce(logits, soft_labels)
-            loss += 0.1 * soft_target_ce(aux_g, soft_labels)
-            loss += 0.1 * soft_target_ce(aux_l, soft_labels)
-            dominant = hard_labels
-
         optimizer.zero_grad()
+        logits, _, aux_g, aux_l = model(images)
+        # Main loss (with NLA weighting)
+        loss = loss_fn(logits, soft_labels, hard_labels)
+        # Aux losses (unweighted soft CE)
+        loss += 0.1 * F.kl_div(F.log_softmax(aux_g, dim=1), soft_labels, reduction='batchmean')
+        loss += 0.1 * F.kl_div(F.log_softmax(aux_l, dim=1), soft_labels, reduction='batchmean')
         loss.backward()
         optimizer.step()
 
         train_loss += loss.item()
         _, pred = torch.max(logits, 1)
         train_preds.extend(pred.cpu().numpy())
-        train_targets.extend(dominant.cpu().numpy())
+        train_targets.extend(hard_labels.cpu().numpy())
         pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
     train_acc = (np.array(train_preds) == np.array(train_targets)).mean()
@@ -215,7 +210,9 @@ for epoch in range(EPOCHS):
             images, soft_labels = images.to(device), soft_labels.to(device)
             hard_labels = hard_labels.to(device)
             logits, _, _, _ = model(images)
-            loss = soft_target_ce(logits, soft_labels)
+            # For validation, we use soft CE to monitor loss
+            log_probs = F.log_softmax(logits, dim=1)
+            loss = -(soft_labels * log_probs).sum(dim=1).mean()
             val_loss += loss.item()
             _, pred = torch.max(logits, 1)
             val_preds.extend(pred.cpu().numpy())
@@ -230,14 +227,7 @@ for epoch in range(EPOCHS):
 
     if val_acc > best_val_acc:
         best_val_acc = val_acc
-        epochs_no_improve = 0
-        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_break.pth"))
+        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_finetuned_nla.pth"))
         print(f"--> Saved best model (val acc {val_acc:.4f})")
-    else:
-        epochs_no_improve += 1
 
-    if epochs_no_improve >= PATIENCE:
-        print(f"Early stopping triggered after {epoch+1} epochs.")
-        break
-
-print(f"Training complete. Best FERPlus validation accuracy: {best_val_acc:.4f}")
+print(f"Fine-tuning complete. Best validation accuracy: {best_val_acc:.4f}")
