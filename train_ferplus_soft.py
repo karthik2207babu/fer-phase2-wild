@@ -149,7 +149,7 @@ def mixup_data(x, y_soft, alpha=0.2):
     index = torch.randperm(batch_size).to(x.device)
     mixed_x = lam * x + (1 - lam) * x[index, :]
     y_a, y_b = y_soft, y_soft[index]
-    return mixed_x, y_a, y_b, lam
+    return mixed_x, y_a, y_b, lam, index
 
 # ----- Training -----
 best_val_acc = 0.0
@@ -182,7 +182,7 @@ for epoch in range(EPOCHS):
 
         # MixUp with 0.8 probability
         if np.random.rand() < 0.8:
-            mixed_x, y_a, y_b, lam = mixup_data(images, soft_labels, alpha=0.2)
+            mixed_x, y_a, y_b, lam, index = mixup_data(images, soft_labels, alpha=0.2)
             logits, _, aux_g, aux_l = model(mixed_x, training=True)
             loss_a = criterion(logits, y_a, aux_g, aux_l)  # NAWLoss expects targets (not soft labels) – we need to adapt
             loss_b = criterion(logits, y_b, aux_g, aux_l)
