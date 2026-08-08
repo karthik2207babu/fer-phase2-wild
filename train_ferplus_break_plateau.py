@@ -16,18 +16,18 @@ from transformer import FRITTransformer
 # ------------------ Config ------------------
 BATCH_SIZE = 64
 EPOCHS = 120
-LEARNING_RATE_BACKBONE = 5e-6          # Very low, but unfrozen from start
-LEARNING_RATE_TRANSFORMER = 3e-4        # Higher for deeper transformer
-WEIGHT_DECAY = 1e-4
+LEARNING_RATE_BACKBONE = 1e-4          # Higher for SGD
+LEARNING_RATE_TRANSFORMER = 1e-3        # Higher for deeper transformer
+WEIGHT_DECAY = 5e-4                     # Moderate for SGD
 MOMENTUM = 0.9
 NUM_CLASSES = 7
 TRANSFORMER_DEPTH = 4
-DROPOUT = 0.6
+DROPOUT = 0.5                           # Reduced slightly
 MIXUP_ALPHA = 0.2
 MIXUP_PROB = 0.8
-PATIENCE = 15                           # Early stopping
+PATIENCE = 15
 
-# Paths (update these)
+# Paths
 PIXELS_CSV = "/content/drive/MyDrive/fer2013.csv"
 LABELS_CSV = "/content/drive/MyDrive/fer2013new.csv"
 SAVE_DIR = "/content/drive/MyDrive/FERPlus_Break_Plateau"
@@ -79,12 +79,10 @@ def prepare_dataframes(pixels_path, labels_path):
     print(f"Kept {len(final_df)} images out of {len(df)}")
     return final_df
 
-# ----- Loss: soft-target cross-entropy -----
 def soft_target_ce(logits, soft_labels):
     log_probs = F.log_softmax(logits, dim=1)
     return -(soft_labels * log_probs).sum(dim=1).mean()
 
-# ----- MixUp function -----
 def mixup_data_soft(x, y_soft, alpha=MIXUP_ALPHA):
     if alpha > 0:
         lam = np.random.beta(alpha, alpha)
@@ -96,7 +94,7 @@ def mixup_data_soft(x, y_soft, alpha=MIXUP_ALPHA):
     y_a, y_b = y_soft, y_soft[index]
     return mixed_x, y_a, y_b, lam
 
-# ----- Data preparation -----
+# ----- Data -----
 df = prepare_dataframes(PIXELS_CSV, LABELS_CSV)
 train_df = df[df['Usage'] == 'Training']
 val_df = df[df['Usage'].isin(['PublicTest', 'PrivateTest'])]
@@ -137,7 +135,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = FRITNet(num_classes=NUM_CLASSES, transformer_depth=TRANSFORMER_DEPTH).to(device)
 
-# Override transformer with dropout=0.6
+# Override transformer with dropout=0.5
 model.transformer = FRITTransformer(
     embed_dim=128,
     num_heads=8,
@@ -146,8 +144,7 @@ model.transformer = FRITTransformer(
     dropout=DROPOUT
 ).to(device)
 
-# ----- Optimizer: SGD with Nesterov -----
-# Separate LR groups
+# ----- Optimizer: SGD with Nesterov (higher LR) -----
 optimizer = optim.SGD([
     {'params': model.backbone.parameters(), 'lr': LEARNING_RATE_BACKBONE},
     {'params': model.lfa.parameters(), 'lr': LEARNING_RATE_TRANSFORMER * 0.5},
@@ -155,12 +152,12 @@ optimizer = optim.SGD([
     {'params': model.transformer.parameters(), 'lr': LEARNING_RATE_TRANSFORMER},
 ], weight_decay=WEIGHT_DECAY, momentum=MOMENTUM, nesterov=True)
 
-# Cosine annealing with warmup
+# Warmup + Cosine scheduler (with higher initial LR)
 def lr_lambda(epoch):
-    if epoch < 3:
-        return (epoch + 1) / 3
+    if epoch < 5:
+        return (epoch + 1) / 5
     else:
-        progress = (epoch - 3) / (EPOCHS - 3)
+        progress = (epoch - 5) / (EPOCHS - 5)
         return 0.5 * (1 + np.cos(np.pi * progress))
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -169,6 +166,10 @@ best_val_acc = 0.0
 epochs_no_improve = 0
 
 for epoch in range(EPOCHS):
+    # No freezing – backbone is trainable from epoch 1
+    if epoch == 0:
+        print("Training with backbone unfrozen from start (LR = 1e-4)")
+
     model.train()
     train_loss = 0.0
     train_preds, train_targets = [], []
@@ -178,14 +179,12 @@ for epoch in range(EPOCHS):
         images, soft_labels = images.to(device), soft_labels.to(device)
         hard_labels = hard_labels.to(device)
 
-        # MixUp
         if np.random.rand() < MIXUP_PROB:
             mixed_x, y_a, y_b, lam = mixup_data_soft(images, soft_labels, alpha=MIXUP_ALPHA)
             logits, _, aux_g, aux_l = model(mixed_x)
             loss_a = soft_target_ce(logits, y_a) + 0.1 * soft_target_ce(aux_g, y_a) + 0.1 * soft_target_ce(aux_l, y_a)
             loss_b = soft_target_ce(logits, y_b) + 0.1 * soft_target_ce(aux_g, y_b) + 0.1 * soft_target_ce(aux_l, y_b)
             loss = lam * loss_a + (1 - lam) * loss_b
-            # For accuracy, use dominant hard label
             index = torch.randperm(images.size(0)).to(device)
             dominant = hard_labels if lam > 0.5 else hard_labels[index]
         else:
@@ -232,7 +231,7 @@ for epoch in range(EPOCHS):
     if val_acc > best_val_acc:
         best_val_acc = val_acc
         epochs_no_improve = 0
-        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_break_ds.pth"))
+        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_break.pth"))
         print(f"--> Saved best model (val acc {val_acc:.4f})")
     else:
         epochs_no_improve += 1
