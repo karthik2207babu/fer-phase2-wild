@@ -104,8 +104,7 @@ train_dataset = FERPlusSoftDataset(train_df, transform=train_transform)
 val_dataset = FERPlusSoftDataset(val_df, transform=val_transform)
 
 # Weighted sampler (based on majority class counts)
-train_hard_labels = [row['hard_label'] for row in train_dataset]  # we need to get hard_label from dataset
-# Actually we can compute it from the dataframe:
+# Get hard labels from the dataframe (soft_label is a numpy array)
 train_hard_labels = [np.argmax(row) for row in train_df['soft_label'].values]
 class_counts = np.bincount(train_hard_labels, minlength=NUM_CLASSES)
 class_weights = 1.0 / (class_counts + 1e-6)
@@ -116,6 +115,7 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler,
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
 print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+print(f"Class counts in train: {class_counts}")
 
 # ----- Model -----
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -191,12 +191,10 @@ for epoch in range(EPOCHS):
     val_loss = 0.0
     with torch.no_grad():
         for images, soft_labels, hard_labels in val_loader:
-            images, hard_labels = images.to(device), hard_labels.to(device)
+            images, soft_labels = images.to(device), soft_labels.to(device)
+            hard_labels = hard_labels.to(device)
             logits, _, _, _ = model(images, training=False)
-            # Use soft labels for loss (but we don't have soft labels in val? we do)
-            # Actually we need to compute loss on soft labels as well for monitoring
-            # Let's compute validation loss on soft labels too
-            loss = soft_target_ce(logits, soft_labels.to(device))
+            loss = soft_target_ce(logits, soft_labels)
             val_loss += loss.item()
             _, pred = torch.max(logits, 1)
             val_preds.extend(pred.cpu().numpy())
