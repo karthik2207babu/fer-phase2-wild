@@ -89,8 +89,8 @@ train_transform = transforms.Compose([
     transforms.RandomHorizontalFlip(),
     transforms.RandomRotation(10),
     transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
-    transforms.ToTensor(),                          # First convert to tensor
-    transforms.RandomErasing(p=0.2, scale=(0.02, 0.15)),  # Then apply erasing
+    transforms.ToTensor(),
+    transforms.RandomErasing(p=0.2, scale=(0.02, 0.15)),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 val_transform = transforms.Compose([
@@ -102,7 +102,7 @@ val_transform = transforms.Compose([
 train_dataset = FERPlusSoftDataset(train_df, transform=train_transform)
 val_dataset = FERPlusSoftDataset(val_df, transform=val_transform)
 
-# Weighted sampler (based on majority class counts)
+# Weighted sampler
 train_hard_labels = [np.argmax(row) for row in train_df['soft_label'].values]
 class_counts = np.bincount(train_hard_labels, minlength=NUM_CLASSES)
 class_weights = 1.0 / (class_counts + 1e-6)
@@ -117,7 +117,7 @@ print(f"Class counts in train: {class_counts}")
 
 # ----- Model -----
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = FRITNet(num_classes=NUM_CLASSES, transformer_depth=2).to(device)  # REMOVED use_srt
+model = FRITNet(num_classes=NUM_CLASSES, transformer_depth=2).to(device)
 
 # Optimizer with lower LR for backbone
 optimizer = optim.AdamW([
@@ -162,7 +162,8 @@ for epoch in range(EPOCHS):
 
         optimizer.zero_grad()
 
-        logits, _, aux_g, aux_l = model(images, training=True)
+        # REMOVED training=True argument
+        logits, _, aux_g, aux_l = model(images)
         loss = soft_target_ce(logits, soft_labels)
         loss += 0.1 * soft_target_ce(aux_g, soft_labels)
         loss += 0.1 * soft_target_ce(aux_l, soft_labels)
@@ -186,7 +187,8 @@ for epoch in range(EPOCHS):
         for images, soft_labels, hard_labels in val_loader:
             images, soft_labels = images.to(device), soft_labels.to(device)
             hard_labels = hard_labels.to(device)
-            logits, _, _, _ = model(images, training=False)
+            # REMOVED training=False argument
+            logits, _, _, _ = model(images)
             loss = soft_target_ce(logits, soft_labels)
             val_loss += loss.item()
             _, pred = torch.max(logits, 1)
