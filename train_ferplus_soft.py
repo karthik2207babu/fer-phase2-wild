@@ -11,7 +11,6 @@ import pandas as pd
 from PIL import Image
 
 from model import FRITNet
-from loss import NAWLoss
 
 # ------------------ Config ------------------
 BATCH_SIZE = 64
@@ -24,10 +23,10 @@ NUM_CLASSES = 7
 # Paths (update these)
 PIXELS_CSV = "/content/drive/MyDrive/fer2013.csv"
 LABELS_CSV = "/content/drive/MyDrive/fer2013new.csv"
-SAVE_DIR = "/content/drive/MyDrive/FERPlus_Advanced_Results"
+SAVE_DIR = "/content/drive/MyDrive/FERPlus_Improved_Results"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# RAF‑DB class order (we keep 7 classes, drop contempt)
+# RAF-DB class order (drop contempt)
 RAF_DB_ORDER = ['surprise', 'fear', 'disgust', 'happiness', 'sadness', 'anger', 'neutral']
 ALL_VOTES = ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'contempt', 'unknown', 'NF']
 
@@ -46,8 +45,8 @@ class FERPlusSoftDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         soft_label = torch.tensor(row['soft_label'], dtype=torch.float32)
-        # Also return the majority class for accuracy (optional)
-        hard_label = torch.argmax(soft_label)
+        # Also get the majority class for sampler weighting
+        hard_label = torch.argmax(soft_label).item()
         return image, soft_label, hard_label
 
 def prepare_dataframes(pixels_path, labels_path):
@@ -75,12 +74,17 @@ def prepare_dataframes(pixels_path, labels_path):
     print(f"Kept {len(final_df)} images out of {len(df)}")
     return final_df
 
-# ----- Data loading -----
+# ----- Loss: soft-target cross-entropy -----
+def soft_target_ce(logits, soft_labels):
+    log_probs = F.log_softmax(logits, dim=1)
+    return -(soft_labels * log_probs).sum(dim=1).mean()
+
+# ----- Data preparation -----
 df = prepare_dataframes(PIXELS_CSV, LABELS_CSV)
 train_df = df[df['Usage'] == 'Training']
 val_df = df[df['Usage'].isin(['PublicTest', 'PrivateTest'])]
 
-# Augmentation (stronger)
+# Stronger augmentation
 train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.RandomHorizontalFlip(),
@@ -99,8 +103,10 @@ val_transform = transforms.Compose([
 train_dataset = FERPlusSoftDataset(train_df, transform=train_transform)
 val_dataset = FERPlusSoftDataset(val_df, transform=val_transform)
 
-# Weighted sampler for class imbalance (based on majority class counts)
-train_hard_labels = [torch.argmax(row['soft_label']).item() for _, row in train_df.iterrows()]
+# Weighted sampler (based on majority class counts)
+train_hard_labels = [row['hard_label'] for row in train_dataset]  # we need to get hard_label from dataset
+# Actually we can compute it from the dataframe:
+train_hard_labels = [np.argmax(row) for row in train_df['soft_label'].values]
 class_counts = np.bincount(train_hard_labels, minlength=NUM_CLASSES)
 class_weights = 1.0 / (class_counts + 1e-6)
 sample_weights = class_weights[train_hard_labels]
@@ -109,20 +115,15 @@ sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_w
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2, pin_memory=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
+print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+
 # ----- Model -----
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = FRITNet(num_classes=NUM_CLASSES, transformer_depth=2, use_srt=False).to(device)
 
-# *** Load pre-trained FaceNet backbone weights (from VGGFace2) ***
-# The TruncatedFaceNet class already loads pretrained weights by default.
-# But we want to freeze the early layers for a few epochs, then unfreeze.
-# However, the model's backbone is already pre-trained, so we just keep it.
-# We'll set lower LR for the backbone.
+# The backbone is already pre-trained (TruncatedFaceNet loads VGGFace2 weights by default)
 
-# Loss: NLA (handles ambiguity and imbalance)
-criterion = NAWLoss(num_classes=NUM_CLASSES, total_epochs=EPOCHS, lambda_param=0.5).to(device)
-
-# Optimizer with different LR groups
+# Optimizer with lower LR for backbone
 optimizer = optim.AdamW([
     {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1},
     {'params': model.lfa.parameters(), 'lr': LEARNING_RATE},
@@ -139,26 +140,12 @@ def lr_lambda(epoch):
         return 0.5 * (1 + np.cos(np.pi * progress))
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-# MixUp function
-def mixup_data(x, y_soft, alpha=0.2):
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-    batch_size = x.size(0)
-    index = torch.randperm(batch_size).to(x.device)
-    mixed_x = lam * x + (1 - lam) * x[index, :]
-    y_a, y_b = y_soft, y_soft[index]
-    return mixed_x, y_a, y_b, lam, index
-
 # ----- Training -----
 best_val_acc = 0.0
 best_val_loss = float('inf')
 
 for epoch in range(EPOCHS):
-    criterion.set_epoch(epoch)  # for NAW scheduling
-
-    # Freezing strategy: freeze backbone for first 5 epochs, then unfreeze
+    # Two-stage freezing
     if epoch == 0:
         print("Stage 1: Freezing backbone, training heads only")
         for name, param in model.named_parameters():
@@ -180,24 +167,12 @@ for epoch in range(EPOCHS):
 
         optimizer.zero_grad()
 
-        # MixUp with 0.8 probability
-        if np.random.rand() < 0.8:
-            mixed_x, y_a, y_b, lam, index = mixup_data(images, soft_labels, alpha=0.2)
-            logits, _, aux_g, aux_l = model(mixed_x, training=True)
-            loss_a = criterion(logits, y_a, aux_g, aux_l)  # NAWLoss expects targets (not soft labels) – we need to adapt
-            loss_b = criterion(logits, y_b, aux_g, aux_l)
-            loss = lam * loss_a + (1 - lam) * loss_b
-            # For accuracy, use the dominant hard label (the one with higher soft label weight)
-            dominant = hard_labels if lam > 0.5 else hard_labels[index]
-        else:
-            logits, _, aux_g, aux_l = model(images, training=True)
-            loss = criterion(logits, hard_labels, aux_g, aux_l)   # NAWLoss uses hard targets, but we can pass soft labels? 
-            # Actually NAWLoss expects hard labels (class indices). We'll convert hard_labels to indices.
-            # NAWLoss internally uses targets for p_gt. We'll pass hard_labels as targets.
-            # Better: we can use soft targets with a custom loss, but NAWLoss is designed for hard labels.
-            # So we'll use hard_labels for NAW.
-            loss = criterion(logits, hard_labels, aux_g, aux_l)
-            dominant = hard_labels
+        logits, _, aux_g, aux_l = model(images, training=True)
+        # Main loss
+        loss = soft_target_ce(logits, soft_labels)
+        # Auxiliary losses (with smaller weight)
+        loss += 0.1 * soft_target_ce(aux_g, soft_labels)
+        loss += 0.1 * soft_target_ce(aux_l, soft_labels)
 
         loss.backward()
         optimizer.step()
@@ -205,7 +180,7 @@ for epoch in range(EPOCHS):
         train_loss += loss.item()
         _, pred = torch.max(logits, 1)
         train_preds.extend(pred.cpu().numpy())
-        train_targets.extend(dominant.cpu().numpy())
+        train_targets.extend(hard_labels.cpu().numpy())
         pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
     train_acc = (np.array(train_preds) == np.array(train_targets)).mean()
@@ -218,7 +193,10 @@ for epoch in range(EPOCHS):
         for images, soft_labels, hard_labels in val_loader:
             images, hard_labels = images.to(device), hard_labels.to(device)
             logits, _, _, _ = model(images, training=False)
-            loss = criterion(logits, hard_labels)  # only main logits for validation
+            # Use soft labels for loss (but we don't have soft labels in val? we do)
+            # Actually we need to compute loss on soft labels as well for monitoring
+            # Let's compute validation loss on soft labels too
+            loss = soft_target_ce(logits, soft_labels.to(device))
             val_loss += loss.item()
             _, pred = torch.max(logits, 1)
             val_preds.extend(pred.cpu().numpy())
@@ -233,7 +211,7 @@ for epoch in range(EPOCHS):
 
     if val_acc > best_val_acc:
         best_val_acc = val_acc
-        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_advanced.pth"))
+        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_improved.pth"))
         print(f"--> Saved best model (val acc {val_acc:.4f})")
 
 print(f"Training complete. Best FERPlus validation accuracy: {best_val_acc:.4f}")
