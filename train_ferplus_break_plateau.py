@@ -232,7 +232,7 @@ for epoch in range(EPOCHS):
     if val_acc > best_val_acc:
         best_val_acc = val_acc
         epochs_no_improve = 0
-        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_break.pth"))
+        torch.save(model.state_dict(), os.path.join(SAVE_DIR, "best_ferplus_break_ds.pth"))
         print(f"--> Saved best model (val acc {val_acc:.4f})")
     else:
         epochs_no_improve += 1
