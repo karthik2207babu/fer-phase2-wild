@@ -101,15 +101,17 @@ class FRITTransformer(nn.Module):
         # =================================================
         # TOKEN STRUCTURE
         #
-        # 0 -> global
-        # 1 -> top-left
-        # 2 -> top-right
-        # 3 -> bottom-left
-        # 4 -> bottom-right
+        # 1 global token
+        # 4 aligned regions
+        # 4 spatial tokens per region
+        #
+        # Total:
+        #     1 + (4 * 4) = 17 tokens
         # =================================================
 
-        self.num_local_regions = 4
-        self.num_tokens = 5
+        self.num_regions = 4
+        self.tokens_per_region = 4
+        self.num_tokens = 17
 
         self.pos_drop = nn.Dropout(
             p=dropout
@@ -126,10 +128,8 @@ class FRITTransformer(nn.Module):
         # =================================================
         # SHARED LOCAL SAFM
         #
-        # One SAFM instance is reused for all four
-        # aligned regions. This keeps computation low
-        # while allowing each region to receive spatial
-        # attention independently.
+        # Same SAFM weights are reused for all four
+        # aligned facial regions.
         # =================================================
 
         self.local_safm = SAFM(
@@ -137,16 +137,15 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # LIGHTWEIGHT SPATIAL POOLING
+        # SPATIAL TOKEN PROJECTION
         #
-        # After SAFM, preserve both average and max
-        # information from each local region.
+        # Each 7x7 subregion:
         #
-        # 128 avg + 128 max
-        #        ↓
-        #      Linear
-        #        ↓
-        #       128
+        #   average pool -> 128
+        #   max pool     -> 128
+        #
+        # concatenate -> 256
+        # projection  -> 128
         # =================================================
 
         self.local_pool_proj = nn.Sequential(
@@ -161,10 +160,6 @@ class FRITTransformer(nn.Module):
 
         # =================================================
         # SINGLE SHARED RELATION TRANSFORMER
-        #
-        # Learns:
-        #   global <-> local
-        #   local <-> local
         # =================================================
 
         transformer_layer = (
@@ -224,7 +219,7 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # ALIGNED 4-REGION SPLIT
+        # FOUR ALIGNED FACE REGIONS
         #
         #      TL | TR
         #      ---+---
@@ -233,84 +228,86 @@ class FRITTransformer(nn.Module):
         # Each region = 14x14.
         # =================================================
 
-        local_regions = [
+        regions = [
             x[:, :, :14, :14],
             x[:, :, :14, 14:],
             x[:, :, 14:, :14],
             x[:, :, 14:, 14:]
         ]
 
-        # =================================================
-        # LOCAL SPATIAL ATTENTION
-        #
-        # Shared SAFM is reused across all regions.
-        # Each region gets its own spatial attention map.
-        # =================================================
-
-        attended_regions = []
-
-        for region in local_regions:
-
-            attended_region = (
-                self.local_safm(
-                    region
-                )
-            )
-
-            attended_regions.append(
-                attended_region
-            )
-
-        # =================================================
-        # SPATIALLY-AWARE LOCAL TOKENIZATION
-        #
-        # Do not immediately collapse 14x14 using only
-        # mean pooling.
-        #
-        # Preserve:
-        #   average response
-        #   maximum salient response
-        #
-        # Then project back to 128 dimensions.
-        # =================================================
-
         local_tokens = []
 
-        for region in attended_regions:
+        # =================================================
+        # PROCESS EACH REGION
+        # =================================================
 
-            avg_feat = F.adaptive_avg_pool2d(
-                region,
-                output_size=1
-            ).flatten(1)
+        for region in regions:
 
-            max_feat = F.adaptive_max_pool2d(
-                region,
-                output_size=1
-            ).flatten(1)
+            # ---------------------------------------------
+            # Spatial attention
+            # ---------------------------------------------
 
-            pooled_feat = torch.cat(
-                [
-                    avg_feat,
-                    max_feat
-                ],
-                dim=1
+            region = self.local_safm(
+                region
             )
 
-            token = self.local_pool_proj(
-                pooled_feat
-            )
+            # ---------------------------------------------
+            # Split 14x14 -> four 7x7 spatial cells
+            #
+            #   A | B
+            #   --+--
+            #   C | D
+            # ---------------------------------------------
 
-            local_tokens.append(
-                token
-            )
+            subregions = [
+                region[:, :, :7, :7],
+                region[:, :, :7, 7:],
+                region[:, :, 7:, :7],
+                region[:, :, 7:, 7:]
+            ]
 
+            for subregion in subregions:
+
+                avg_feat = (
+                    F.adaptive_avg_pool2d(
+                        subregion,
+                        output_size=1
+                    ).flatten(1)
+                )
+
+                max_feat = (
+                    F.adaptive_max_pool2d(
+                        subregion,
+                        output_size=1
+                    ).flatten(1)
+                )
+
+                pooled_feat = torch.cat(
+                    [
+                        avg_feat,
+                        max_feat
+                    ],
+                    dim=1
+                )
+
+                token = (
+                    self.local_pool_proj(
+                        pooled_feat
+                    )
+                )
+
+                local_tokens.append(
+                    token
+                )
+
+        # [B, 16, 128]
         local_tokens = torch.stack(
             local_tokens,
             dim=1
         )
 
         # =================================================
-        # GLOBAL + LOCAL TOKEN SEQUENCE
+        # GLOBAL + LOCAL TOKENS
         # =================================================
 
         global_token = (
@@ -325,12 +322,22 @@ class FRITTransformer(nn.Module):
             dim=1
         )
 
+        # Safety check.
+        if tokens.size(1) != self.num_tokens:
+            raise RuntimeError(
+                "Unexpected token count: "
+                f"{tokens.size(1)}"
+            )
+
         tokens = self.pos_drop(
             tokens + self.pos_embed
         )
 
         # =================================================
         # SINGLE RELATION TRANSFORMER
+        #
+        # The global token can attend to every local
+        # spatial token and local tokens can interact.
         # =================================================
 
         relation_tokens = (
@@ -339,21 +346,15 @@ class FRITTransformer(nn.Module):
             )
         )
 
-        # Token 0 is the fused global-local
-        # representation after self-attention.
-        fused_global = relation_tokens[
-            :,
-            0,
-            :
-        ]
+        # Global token after global-local relations.
+        fused_global = (
+            relation_tokens[:, 0, :]
+        )
 
-        # Remaining tokens represent relational
-        # local information.
-        fused_local = relation_tokens[
-            :,
-            1:,
-            :
-        ]
+        # Sixteen spatial local tokens.
+        fused_local = (
+            relation_tokens[:, 1:, :]
+        )
 
         local_feat = fused_local.mean(
             dim=1
@@ -365,7 +366,6 @@ class FRITTransformer(nn.Module):
             )
         )
 
-        # Keep model.py return contract unchanged.
         return (
             None,
             fused_global,
