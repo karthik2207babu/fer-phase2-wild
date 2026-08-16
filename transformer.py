@@ -99,7 +99,13 @@ class FRITTransformer(nn.Module):
         super(FRITTransformer, self).__init__()
 
         # =================================================
-        # 1 global + 4 local tokens
+        # TOKEN STRUCTURE
+        #
+        # 0 -> global
+        # 1 -> top-left
+        # 2 -> top-right
+        # 3 -> bottom-left
+        # 4 -> bottom-right
         # =================================================
 
         self.num_regions = 4
@@ -118,7 +124,7 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # SHARED LOCAL SAFM
+        # LOCAL SAFM
         # =================================================
 
         self.local_safm = SAFM(
@@ -126,10 +132,9 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # LOCAL TOKEN PROJECTION
+        # LOCAL POOLING
         #
-        # avg + max = 256
-        # 256 -> 128
+        # avg + max -> 256 -> 128
         # =================================================
 
         self.local_pool_proj = nn.Sequential(
@@ -143,30 +148,28 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # GLOBAL-LOCAL GATING
+        # GLOBAL POOLING
         #
-        # Input:
-        #   global feature + local feature
+        # V3 used:
         #
-        # Output:
-        #   scalar importance for each local region
+        #     global_feat = x.mean(...)
+        #
+        # V6 keeps the same global feature map but
+        # preserves both average and strongest activation.
         # =================================================
 
-        self.local_gate = nn.Sequential(
+        self.global_pool_proj = nn.Sequential(
             nn.Linear(
                 embed_dim * 2,
                 embed_dim
             ),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(
-                embed_dim,
-                1
+            nn.LayerNorm(
+                embed_dim
             )
         )
 
         # =================================================
-        # RELATION TRANSFORMER
+        # SINGLE RELATION TRANSFORMER
         # =================================================
 
         transformer_layer = (
@@ -212,11 +215,33 @@ class FRITTransformer(nn.Module):
             )
 
         # =================================================
-        # GLOBAL FEATURE
+        # GLOBAL TOKEN
+        #
+        # avg + max retains both:
+        #   broad/global activation
+        #   strongest salient activation
         # =================================================
 
-        global_feat = x.mean(
-            dim=[2, 3]
+        global_avg = F.adaptive_avg_pool2d(
+            x,
+            output_size=1
+        ).flatten(1)
+
+        global_max = F.adaptive_max_pool2d(
+            x,
+            output_size=1
+        ).flatten(1)
+
+        global_pool = torch.cat(
+            [
+                global_avg,
+                global_max
+            ],
+            dim=1
+        )
+
+        global_feat = self.global_pool_proj(
+            global_pool
         )
 
         aux_global_logits = (
@@ -227,6 +252,10 @@ class FRITTransformer(nn.Module):
 
         # =================================================
         # FOUR ALIGNED REGIONS
+        #
+        #      TL | TR
+        #      ---+---
+        #      BL | BR
         # =================================================
 
         regions = [
@@ -236,21 +265,25 @@ class FRITTransformer(nn.Module):
             x[:, :, 14:, 14:]
         ]
 
+        # =================================================
+        # LOCAL TOKENS
+        # =================================================
+
         local_tokens = []
 
         for region in regions:
 
-            # -------------------------------------------------
+            # ---------------------------------------------
             # Local spatial attention
-            # -------------------------------------------------
+            # ---------------------------------------------
 
             region = self.local_safm(
                 region
             )
 
-            # -------------------------------------------------
-            # Preserve salient + average information
-            # -------------------------------------------------
+            # ---------------------------------------------
+            # Average + max pooling
+            # ---------------------------------------------
 
             avg_feat = (
                 F.adaptive_avg_pool2d(
@@ -282,61 +315,13 @@ class FRITTransformer(nn.Module):
                 token
             )
 
-        # [B, 4, 128]
         local_tokens = torch.stack(
             local_tokens,
             dim=1
         )
 
         # =================================================
-        # GLOBAL-LOCAL GATING
-        #
-        # Generate one importance score per local region.
-        # =================================================
-
-        global_context = (
-            global_feat.unsqueeze(1)
-            .expand(
-                -1,
-                self.num_regions,
-                -1
-            )
-        )
-
-        gate_input = torch.cat(
-            [
-                global_context,
-                local_tokens
-            ],
-            dim=-1
-        )
-
-        gate_logits = self.local_gate(
-            gate_input
-        ).squeeze(-1)
-
-        # Softmax forces the model to distribute attention
-        # across the four facial regions.
-        gate_weights = F.softmax(
-            gate_logits,
-            dim=1
-        )
-
-        # [B, 4, 1]
-        gate_weights = gate_weights.unsqueeze(
-            -1
-        )
-
-        weighted_local_tokens = (
-            local_tokens
-            * (
-                1.0
-                + gate_weights
-            )
-        )
-
-        # =================================================
-        # GLOBAL + LOCAL TOKENS
+        # GLOBAL + LOCAL
         # =================================================
 
         global_token = (
@@ -346,7 +331,7 @@ class FRITTransformer(nn.Module):
         tokens = torch.cat(
             [
                 global_token,
-                weighted_local_tokens
+                local_tokens
             ],
             dim=1
         )
@@ -366,13 +351,17 @@ class FRITTransformer(nn.Module):
         )
 
         # Global token after global-local interaction.
-        fused_global = (
-            relation_tokens[:, 0, :]
-        )
+        fused_global = relation_tokens[
+            :,
+            0,
+            :
+        ]
 
-        fused_local = (
-            relation_tokens[:, 1:, :]
-        )
+        fused_local = relation_tokens[
+            :,
+            1:,
+            :
+        ]
 
         local_feat = fused_local.mean(
             dim=1
