@@ -92,20 +92,14 @@ class FRITTransformer(nn.Module):
         self,
         embed_dim=128,
         num_heads=8,
-        num_local_layers=2,
-        num_classes=7,
+        num_local_layers=4,
+        num_classes=8,
         dropout=0.5
     ):
         super(FRITTransformer, self).__init__()
 
         # =================================================
-        # TOKEN STRUCTURE
-        #
-        # 0 -> global
-        # 1 -> top-left
-        # 2 -> top-right
-        # 3 -> bottom-left
-        # 4 -> bottom-right
+        # 1 GLOBAL + 4 LOCAL TOKENS
         # =================================================
 
         self.num_regions = 4
@@ -124,7 +118,7 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # LOCAL SAFM
+        # SHARED LOCAL SAFM
         # =================================================
 
         self.local_safm = SAFM(
@@ -132,33 +126,11 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # LOCAL POOLING
-        #
-        # avg + max -> 256 -> 128
+        # LOCAL AVG + MAX POOLING
+        # 256 -> 128
         # =================================================
 
         self.local_pool_proj = nn.Sequential(
-            nn.Linear(
-                embed_dim * 2,
-                embed_dim
-            ),
-            nn.LayerNorm(
-                embed_dim
-            )
-        )
-
-        # =================================================
-        # GLOBAL POOLING
-        #
-        # V3 used:
-        #
-        #     global_feat = x.mean(...)
-        #
-        # V6 keeps the same global feature map but
-        # preserves both average and strongest activation.
-        # =================================================
-
-        self.global_pool_proj = nn.Sequential(
             nn.Linear(
                 embed_dim * 2,
                 embed_dim
@@ -191,7 +163,7 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # AUXILIARY CLASSIFIERS
+        # AUXILIARY HEADS
         # =================================================
 
         self.aux_global_head = nn.Linear(
@@ -210,38 +182,16 @@ class FRITTransformer(nn.Module):
 
         if H != 28 or W != 28:
             raise ValueError(
-                "FRITTransformer expects a "
+                "FRITTransformer expects "
                 f"28x28 feature map, got {H}x{W}"
             )
 
         # =================================================
-        # GLOBAL TOKEN
-        #
-        # avg + max retains both:
-        #   broad/global activation
-        #   strongest salient activation
+        # GLOBAL FEATURE
         # =================================================
 
-        global_avg = F.adaptive_avg_pool2d(
-            x,
-            output_size=1
-        ).flatten(1)
-
-        global_max = F.adaptive_max_pool2d(
-            x,
-            output_size=1
-        ).flatten(1)
-
-        global_pool = torch.cat(
-            [
-                global_avg,
-                global_max
-            ],
-            dim=1
-        )
-
-        global_feat = self.global_pool_proj(
-            global_pool
+        global_feat = x.mean(
+            dim=[2, 3]
         )
 
         aux_global_logits = (
@@ -253,9 +203,9 @@ class FRITTransformer(nn.Module):
         # =================================================
         # FOUR ALIGNED REGIONS
         #
-        #      TL | TR
-        #      ---+---
-        #      BL | BR
+        #     TL | TR
+        #     ---+---
+        #     BL | BR
         # =================================================
 
         regions = [
@@ -273,17 +223,9 @@ class FRITTransformer(nn.Module):
 
         for region in regions:
 
-            # ---------------------------------------------
-            # Local spatial attention
-            # ---------------------------------------------
-
             region = self.local_safm(
                 region
             )
-
-            # ---------------------------------------------
-            # Average + max pooling
-            # ---------------------------------------------
 
             avg_feat = (
                 F.adaptive_avg_pool2d(
@@ -341,7 +283,7 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # SINGLE RELATION TRANSFORMER
+        # RELATION TRANSFORMER
         # =================================================
 
         relation_tokens = (
@@ -350,18 +292,13 @@ class FRITTransformer(nn.Module):
             )
         )
 
-        # Global token after global-local interaction.
-        fused_global = relation_tokens[
-            :,
-            0,
-            :
-        ]
+        fused_global = (
+            relation_tokens[:, 0, :]
+        )
 
-        fused_local = relation_tokens[
-            :,
-            1:,
-            :
-        ]
+        fused_local = (
+            relation_tokens[:, 1:, :]
+        )
 
         local_feat = fused_local.mean(
             dim=1
@@ -372,6 +309,9 @@ class FRITTransformer(nn.Module):
                 local_feat
             )
         )
+
+        # model.py expects:
+        # logits, features, aux_global, aux_local
 
         return (
             None,
