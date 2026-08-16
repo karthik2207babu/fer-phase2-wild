@@ -81,6 +81,9 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+from safm import SAFM
 
 
 class FRITTransformer(nn.Module):
@@ -116,6 +119,42 @@ class FRITTransformer(nn.Module):
             torch.randn(
                 1,
                 self.num_tokens,
+                embed_dim
+            )
+        )
+
+        # =================================================
+        # SHARED LOCAL SAFM
+        #
+        # One SAFM instance is reused for all four
+        # aligned regions. This keeps computation low
+        # while allowing each region to receive spatial
+        # attention independently.
+        # =================================================
+
+        self.local_safm = SAFM(
+            kernel_size=7
+        )
+
+        # =================================================
+        # LIGHTWEIGHT SPATIAL POOLING
+        #
+        # After SAFM, preserve both average and max
+        # information from each local region.
+        #
+        # 128 avg + 128 max
+        #        ↓
+        #      Linear
+        #        ↓
+        #       128
+        # =================================================
+
+        self.local_pool_proj = nn.Sequential(
+            nn.Linear(
+                embed_dim * 2,
+                embed_dim
+            ),
+            nn.LayerNorm(
                 embed_dim
             )
         )
@@ -164,7 +203,6 @@ class FRITTransformer(nn.Module):
 
         B, C, H, W = x.shape
 
-        # LFA in the current FRITNet produces 28x28.
         if H != 28 or W != 28:
             raise ValueError(
                 "FRITTransformer expects a "
@@ -188,49 +226,86 @@ class FRITTransformer(nn.Module):
         # =================================================
         # ALIGNED 4-REGION SPLIT
         #
-        #  TL | TR
-        #  ---+---
-        #  BL | BR
+        #      TL | TR
+        #      ---+---
+        #      BL | BR
         #
         # Each region = 14x14.
         # =================================================
 
-        top_left = x[
-            :,
-            :,
-            :14,
-            :14
+        local_regions = [
+            x[:, :, :14, :14],
+            x[:, :, :14, 14:],
+            x[:, :, 14:, :14],
+            x[:, :, 14:, 14:]
         ]
 
-        top_right = x[
-            :,
-            :,
-            :14,
-            14:
-        ]
+        # =================================================
+        # LOCAL SPATIAL ATTENTION
+        #
+        # Shared SAFM is reused across all regions.
+        # Each region gets its own spatial attention map.
+        # =================================================
 
-        bottom_left = x[
-            :,
-            :,
-            14:,
-            :14
-        ]
+        attended_regions = []
 
-        bottom_right = x[
-            :,
-            :,
-            14:,
-            14:
-        ]
+        for region in local_regions:
 
-        # One compact token per aligned region.
+            attended_region = (
+                self.local_safm(
+                    region
+                )
+            )
+
+            attended_regions.append(
+                attended_region
+            )
+
+        # =================================================
+        # SPATIALLY-AWARE LOCAL TOKENIZATION
+        #
+        # Do not immediately collapse 14x14 using only
+        # mean pooling.
+        #
+        # Preserve:
+        #   average response
+        #   maximum salient response
+        #
+        # Then project back to 128 dimensions.
+        # =================================================
+
+        local_tokens = []
+
+        for region in attended_regions:
+
+            avg_feat = F.adaptive_avg_pool2d(
+                region,
+                output_size=1
+            ).flatten(1)
+
+            max_feat = F.adaptive_max_pool2d(
+                region,
+                output_size=1
+            ).flatten(1)
+
+            pooled_feat = torch.cat(
+                [
+                    avg_feat,
+                    max_feat
+                ],
+                dim=1
+            )
+
+            token = self.local_pool_proj(
+                pooled_feat
+            )
+
+            local_tokens.append(
+                token
+            )
+
         local_tokens = torch.stack(
-            [
-                top_left.mean(dim=[2, 3]),
-                top_right.mean(dim=[2, 3]),
-                bottom_left.mean(dim=[2, 3]),
-                bottom_right.mean(dim=[2, 3])
-            ],
+            local_tokens,
             dim=1
         )
 
@@ -255,7 +330,7 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # RELATION LEARNING
+        # SINGLE RELATION TRANSFORMER
         # =================================================
 
         relation_tokens = (
@@ -264,14 +339,16 @@ class FRITTransformer(nn.Module):
             )
         )
 
-        # Fused representation.
+        # Token 0 is the fused global-local
+        # representation after self-attention.
         fused_global = relation_tokens[
             :,
             0,
             :
         ]
 
-        # Relational local representation.
+        # Remaining tokens represent relational
+        # local information.
         fused_local = relation_tokens[
             :,
             1:,
@@ -288,8 +365,7 @@ class FRITTransformer(nn.Module):
             )
         )
 
-        # First output is unused by model.py.
-        # Keep the return contract unchanged.
+        # Keep model.py return contract unchanged.
         return (
             None,
             fused_global,
