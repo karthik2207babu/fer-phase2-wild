@@ -95,14 +95,22 @@ class FRITTransformer(nn.Module):
     ):
         super(FRITTransformer, self).__init__()
 
-        # -------------------------------------------------
-        # 1 global token + 4 aligned local-region tokens
-        # -------------------------------------------------
+        # =================================================
+        # TOKEN STRUCTURE
+        #
+        # 0 -> global
+        # 1 -> top-left
+        # 2 -> top-right
+        # 3 -> bottom-left
+        # 4 -> bottom-right
+        # =================================================
 
         self.num_local_regions = 4
         self.num_tokens = 5
 
-        self.pos_drop = nn.Dropout(p=dropout)
+        self.pos_drop = nn.Dropout(
+            p=dropout
+        )
 
         self.pos_embed = nn.Parameter(
             torch.randn(
@@ -112,34 +120,35 @@ class FRITTransformer(nn.Module):
             )
         )
 
-        # One shared transformer.
+        # =================================================
+        # SINGLE SHARED RELATION TRANSFORMER
         #
-        # Token layout:
-        #   0 -> global
-        #   1 -> top-left
-        #   2 -> top-right
-        #   3 -> bottom-left
-        #   4 -> bottom-right
-        #
-        # Self-attention therefore directly learns
-        # global <-> local and local <-> local relations.
-        transformer_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True
+        # Learns:
+        #   global <-> local
+        #   local <-> local
+        # =================================================
+
+        transformer_layer = (
+            nn.TransformerEncoderLayer(
+                d_model=embed_dim,
+                nhead=num_heads,
+                dim_feedforward=embed_dim * 4,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True
+            )
         )
 
-        self.local_transformer = nn.TransformerEncoder(
-            transformer_layer,
-            num_layers=num_local_layers
+        self.local_transformer = (
+            nn.TransformerEncoder(
+                transformer_layer,
+                num_layers=num_local_layers
+            )
         )
 
-        # -------------------------------------------------
-        # Auxiliary classifiers
-        # -------------------------------------------------
+        # =================================================
+        # AUXILIARY CLASSIFIERS
+        # =================================================
 
         self.aux_global_head = nn.Linear(
             embed_dim,
@@ -151,21 +160,11 @@ class FRITTransformer(nn.Module):
             num_classes
         )
 
-        # Kept for checkpoint compatibility.
-        # FRITNet currently uses its own classifier.
-        self.head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Dropout(dropout),
-            nn.Linear(
-                embed_dim,
-                num_classes
-            )
-        )
-
     def forward(self, x):
 
         B, C, H, W = x.shape
 
+        # LFA in the current FRITNet produces 28x28.
         if H != 28 or W != 28:
             raise ValueError(
                 "FRITTransformer expects a "
@@ -173,7 +172,7 @@ class FRITTransformer(nn.Module):
             )
 
         # =================================================
-        # GLOBAL FEATURE
+        # GLOBAL TOKEN
         # =================================================
 
         global_feat = x.mean(
@@ -187,13 +186,11 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # 4 ALIGNED LOCAL REGIONS
+        # ALIGNED 4-REGION SPLIT
         #
-        # After RetinaFace alignment:
-        #
-        #   TL | TR
-        #   ---+---
-        #   BL | BR
+        #  TL | TR
+        #  ---+---
+        #  BL | BR
         #
         # Each region = 14x14.
         # =================================================
@@ -226,12 +223,7 @@ class FRITTransformer(nn.Module):
             14:
         ]
 
-        # Pool each region into one token.
-        #
-        # We retain the semantic region layout while
-        # keeping the relation stage extremely cheap:
-        #
-        # 4 local tokens + 1 global token.
+        # One compact token per aligned region.
         local_tokens = torch.stack(
             [
                 top_left.mean(dim=[2, 3]),
@@ -246,7 +238,9 @@ class FRITTransformer(nn.Module):
         # GLOBAL + LOCAL TOKEN SEQUENCE
         # =================================================
 
-        global_token = global_feat.unsqueeze(1)
+        global_token = (
+            global_feat.unsqueeze(1)
+        )
 
         tokens = torch.cat(
             [
@@ -261,27 +255,27 @@ class FRITTransformer(nn.Module):
         )
 
         # =================================================
-        # SINGLE RELATION TRANSFORMER
-        #
-        # Global token attends to local regions.
-        # Local regions attend to one another.
-        # No separate RRT / GLRT transformer stacks.
+        # RELATION LEARNING
         # =================================================
 
         relation_tokens = (
-            self.local_transformer(tokens)
+            self.local_transformer(
+                tokens
+            )
         )
 
-        # First token is the fused global-local
-        # representation.
+        # Fused representation.
         fused_global = relation_tokens[
-            :, 0, :
+            :,
+            0,
+            :
         ]
 
-        # Remaining four tokens represent the
-        # relational local features.
+        # Relational local representation.
         fused_local = relation_tokens[
-            :, 1:, :
+            :,
+            1:,
+            :
         ]
 
         local_feat = fused_local.mean(
@@ -294,20 +288,10 @@ class FRITTransformer(nn.Module):
             )
         )
 
-        # Keep the same return contract expected
-        # by model.py and all current training scripts.
-        #
-        # logits placeholder is intentionally produced
-        # by the outer FRITNet classifier.
-        #
-        # self.head is retained only for checkpoint
-        # compatibility and is not used here.
-        logits = self.head(
-            fused_global
-        )
-
+        # First output is unused by model.py.
+        # Keep the return contract unchanged.
         return (
-            logits,
+            None,
             fused_global,
             aux_global_logits,
             aux_local_logits
