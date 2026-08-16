@@ -78,230 +78,65 @@ import torch.nn.functional as F
 
 
 class LFAModule(nn.Module):
+    def __init__(self, in_channels=1792, out_channels=128):
+        super().__init__()
 
-    def __init__(
-        self,
-        in_channels=1792,
-        out_channels=128
-    ):
-        super(LFAModule, self).__init__()
+        hidden = max(32, in_channels // 16)
 
-        # =================================================
-        # ORIGINAL LFA PATH
-        #
-        # Kept unchanged so all existing pretrained LFA
-        # weights remain compatible.
-        # =================================================
+        self.channel_attn = nn.Sequential(
+            nn.Linear(in_channels, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, in_channels)
+        )
 
         self.bridge = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=1,
-            bias=False
+            in_channels, out_channels, 1, bias=False
         )
-
-        self.bn_bridge = nn.BatchNorm2d(
-            out_channels
-        )
-
-        self.relu = nn.ReLU(
-            inplace=True
-        )
-
-        # =================================================
-        # V13 WIDE FEATURE PATH
-        #
-        # Preserve more of FaceNet's 1792-channel
-        # representation before compressing to 128.
-        #
-        # IMPORTANT:
-        # This path is initially disabled by zero
-        # initialization of wide_reduce.
-        # =================================================
-
-        self.wide_bridge = nn.Conv2d(
-            in_channels,
-            512,
-            kernel_size=1,
-            bias=False
-        )
-
-        self.wide_bn = nn.BatchNorm2d(
-            512
-        )
-
-        self.wide_conv1 = nn.Conv2d(
-            512,
-            512,
-            kernel_size=3,
-            padding=1,
-            bias=False
-        )
-
-        self.wide_bn1 = nn.BatchNorm2d(
-            512
-        )
-
-        self.wide_conv2 = nn.Conv2d(
-            512,
-            512,
-            kernel_size=3,
-            padding=1,
-            bias=False
-        )
-
-        self.wide_bn2 = nn.BatchNorm2d(
-            512
-        )
-
-        self.wide_reduce = nn.Conv2d(
-            512,
-            out_channels,
-            kernel_size=1,
-            bias=False
-        )
-
-        # Start the new branch as exactly zero.
-        nn.init.zeros_(
-            self.wide_reduce.weight
-        )
-
-        # =================================================
-        # ORIGINAL LFA LOCAL PROCESSING
-        # =================================================
+        self.bn_bridge = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
 
         self.conv1x3 = nn.Conv2d(
-            out_channels,
-            out_channels,
-            kernel_size=(1, 3),
-            padding=(0, 1),
-            bias=False
+            out_channels, out_channels, (1, 3),
+            padding=(0, 1), bias=False
         )
-
-        self.bn1 = nn.BatchNorm2d(
-            out_channels
-        )
+        self.bn1 = nn.BatchNorm2d(out_channels)
 
         self.conv3x3 = nn.Conv2d(
-            out_channels,
-            out_channels,
-            kernel_size=(3, 3),
-            padding=(1, 1),
-            bias=False
+            out_channels, out_channels, 3,
+            padding=1, bias=False
         )
-
-        self.bn2 = nn.BatchNorm2d(
-            out_channels
-        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.conv3x1 = nn.Conv2d(
-            out_channels,
-            out_channels,
-            kernel_size=(3, 1),
-            padding=(1, 0),
-            bias=False
+            out_channels, out_channels, (3, 1),
+            padding=(1, 0), bias=False
         )
+        self.bn3 = nn.BatchNorm2d(out_channels)
 
-        self.bn3 = nn.BatchNorm2d(
-            out_channels
-        )
+        nn.init.zeros_(self.channel_attn[2].weight)
+        nn.init.zeros_(self.channel_attn[2].bias)
 
-    def _process_region(
-        self,
-        region
-    ):
+    def _process_region(self, x):
+        x = self.relu(self.bn1(self.conv1x3(x)))
+        x = self.relu(self.bn2(self.conv3x3(x)))
+        x = self.relu(self.bn3(self.conv3x1(x)))
+        return x + x.detach() * 0
+
+    def forward(self, x):
+        b, c, _, _ = x.shape
+
+        pooled = F.adaptive_avg_pool2d(x, 1).view(b, c)
+        gate = 2.0 * torch.sigmoid(
+            self.channel_attn(pooled)
+        ).view(b, c, 1, 1)
+
+        x = x * gate
 
         x = self.relu(
-            self.bn1(
-                self.conv1x3(
-                    region
-                )
-            )
-        )
-
-        x = self.relu(
-            self.bn2(
-                self.conv3x3(
-                    x
-                )
-            )
-        )
-
-        x = self.relu(
-            self.bn3(
-                self.conv3x1(
-                    x
-                )
-            )
-        )
-
-        return x + region
-
-    def forward(
-        self,
-        x
-    ):
-
-        # =================================================
-        # ORIGINAL 128-DIMENSIONAL PATH
-        # =================================================
-
-        base = self.relu(
             self.bn_bridge(
                 self.bridge(x)
             )
         )
-
-        # =================================================
-        # V13 WIDE PATH
-        #
-        # Still operates at native FaceNet 7x7 resolution.
-        # This avoids the huge compute cost of maintaining
-        # 512 channels at 28x28.
-        # =================================================
-
-        wide = self.wide_bridge(
-            x
-        )
-
-        wide = self.relu(
-            self.wide_bn(
-                wide
-            )
-        )
-
-        wide = self.relu(
-            self.wide_bn1(
-                self.wide_conv1(
-                    wide
-                )
-            )
-        )
-
-        wide = self.relu(
-            self.wide_bn2(
-                self.wide_conv2(
-                    wide
-                )
-            )
-        )
-
-        wide = self.wide_reduce(
-            wide
-        )
-
-        # =================================================
-        # MERGE
-        #
-        # wide is initially exactly zero, so loading the
-        # previous checkpoint starts from the old behavior.
-        # =================================================
-
-        x = base + wide
-
-        # =================================================
-        # UPSAMPLE
-        # =================================================
 
         x = F.interpolate(
             x,
@@ -310,110 +145,17 @@ class LFAModule(nn.Module):
             align_corners=False
         )
 
-        # =================================================
-        # FOUR 14x14 REGIONS
-        # =================================================
+        tl = x[:, :, :14, :14]
+        tr = x[:, :, :14, 14:]
+        bl = x[:, :, 14:, :14]
+        br = x[:, :, 14:, 14:]
 
-        top_left = x[
-            :,
-            :,
-            :14,
-            :14
-        ]
+        tl = self._process_region(tl)
+        tr = self._process_region(tr)
+        bl = self._process_region(bl)
+        br = self._process_region(br)
 
-        top_right = x[
-            :,
-            :,
-            :14,
-            14:
-        ]
+        top = torch.cat((tl, tr), dim=3)
+        bottom = torch.cat((bl, br), dim=3)
 
-        bottom_left = x[
-            :,
-            :,
-            14:,
-            :14
-        ]
-
-        bottom_right = x[
-            :,
-            :,
-            14:,
-            14:
-        ]
-
-        # =================================================
-        # ORIGINAL REGIONAL PROCESSING
-        # =================================================
-
-        tl = self._process_region(
-            top_left
-        )
-
-        tr = self._process_region(
-            top_right
-        )
-
-        bl = self._process_region(
-            bottom_left
-        )
-
-        br = self._process_region(
-            bottom_right
-        )
-
-        # =================================================
-        # REGION FUSION
-        # =================================================
-
-        top_half = torch.cat(
-            (
-                tl,
-                tr
-            ),
-            dim=3
-        )
-
-        bottom_half = torch.cat(
-            (
-                bl,
-                br
-            ),
-            dim=3
-        )
-
-        fused_map = torch.cat(
-            (
-                top_half,
-                bottom_half
-            ),
-            dim=2
-        )
-
-        return fused_map
-
-
-if __name__ == "__main__":
-
-    lfa = LFAModule()
-
-    dummy_input = torch.randn(
-        2,
-        1792,
-        7,
-        7
-    )
-
-    output = lfa(
-        dummy_input
-    )
-
-    print(
-        f"LFA Input shape: "
-        f"{dummy_input.shape}"
-    )
-
-    print(
-        f"LFA Output shape: "
-        f"{output.shape}"
-    )
+        return torch.cat((top, bottom), dim=2)
