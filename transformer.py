@@ -82,12 +82,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from safm import SAFM
 
 
 class FRITTransformer(nn.Module):
-
     def __init__(
         self,
         embed_dim=128,
@@ -96,86 +94,42 @@ class FRITTransformer(nn.Module):
         num_classes=8,
         dropout=0.5
     ):
-        super(FRITTransformer, self).__init__()
-
-        # =================================================
-        # 4 PERMANENT ALIGNED LOCAL REGIONS
-        # =================================================
+        super().__init__()
 
         self.num_regions = 4
 
-        # =================================================
-        # GLOBAL BRANCH
-        #
-        # Global SAFM is already applied by FRITNet before
-        # this module.
-        # =================================================
-
-        # =================================================
-        # FOUR INDEPENDENT LOCAL SAFMs
-        #
-        # MRAN uses separate SAFM modules for the four
-        # facial regions.
-        # =================================================
-
-        self.local_safm_tl = SAFM(
-            kernel_size=7
-        )
-
-        self.local_safm_tr = SAFM(
-            kernel_size=7
-        )
-
-        self.local_safm_bl = SAFM(
-            kernel_size=7
-        )
-
-        self.local_safm_br = SAFM(
-            kernel_size=7
-        )
-
-        # =================================================
-        # LOCAL FEATURE PROJECTION
-        #
-        # avg + max -> 256 -> 128
-        # =================================================
+        self.local_safm = SAFM(kernel_size=7)
 
         self.local_pool_proj = nn.Sequential(
-            nn.Linear(
-                embed_dim * 2,
-                embed_dim
-            ),
-            nn.LayerNorm(
-                embed_dim
-            )
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.LayerNorm(embed_dim)
         )
 
-        # =================================================
-        # LOCAL POSITION EMBEDDING
-        #
-        # Used by RRT for TL/TR/BL/BR.
-        # =================================================
-
-        self.local_pos_embed = nn.Parameter(
-            torch.randn(
-                1,
-                4,
-                embed_dim
-            )
+        # V16: learned spatial pooling residual
+        self.local_spatial_score = nn.Conv2d(
+            embed_dim, 1, kernel_size=3, padding=1
         )
 
-        self.local_pos_drop = nn.Dropout(
-            p=dropout
+        self.local_spatial_proj = nn.Linear(
+            embed_dim, embed_dim
         )
 
-        # =================================================
-        # RRT
-        #
-        # ONE shared relation transformer operating only
-        # on the four local regions.
-        # =================================================
+        # Start V16 branch with zero contribution.
+        nn.init.zeros_(self.local_spatial_score.weight)
+        nn.init.zeros_(self.local_spatial_score.bias)
+        nn.init.zeros_(self.local_spatial_proj.weight)
+        nn.init.zeros_(self.local_spatial_proj.bias)
 
-        rrt_layer = (
+        self.global_pool_proj = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.LayerNorm(embed_dim)
+        )
+
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, 5, embed_dim)
+        )
+
+        self.local_transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=embed_dim,
                 nhead=num_heads,
@@ -183,274 +137,101 @@ class FRITTransformer(nn.Module):
                 dropout=dropout,
                 activation="gelu",
                 batch_first=True
-            )
-        )
-
-        self.rrt = nn.TransformerEncoder(
-            rrt_layer,
+            ),
             num_layers=num_local_layers
         )
 
-        # =================================================
-        # GLOBAL-LOCAL RELATION
-        #
-        # Global feature queries the four relational local
-        # features.
-        #
-        # ONE cross-attention block replaces the heavier
-        # MRAN-style GLRT stack.
-        # =================================================
-
-        self.glrt = nn.MultiheadAttention(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
-        )
-
-        self.glrt_norm1 = nn.LayerNorm(
-            embed_dim
-        )
-
-        self.glrt_ffn = nn.Sequential(
-            nn.Linear(
-                embed_dim,
-                embed_dim * 4
-            ),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(
-                embed_dim * 4,
-                embed_dim
-            )
-        )
-
-        self.glrt_norm2 = nn.LayerNorm(
-            embed_dim
-        )
-
-        # =================================================
-        # GLOBAL AUXILIARY HEAD
-        # =================================================
-
         self.aux_global_head = nn.Linear(
-            embed_dim,
-            num_classes
+            embed_dim, num_classes
         )
-
-        # =================================================
-        # LOCAL AUXILIARY HEAD
-        # =================================================
 
         self.aux_local_head = nn.Linear(
-            embed_dim,
-            num_classes
+            embed_dim, num_classes
         )
 
-    def _pool_local_region(
-        self,
-        region
-    ):
+    def _local_token(self, region):
+        avg_feat = F.adaptive_avg_pool2d(
+            region, 1
+        ).flatten(1)
 
-        avg_feat = (
-            F.adaptive_avg_pool2d(
-                region,
-                output_size=1
-            ).flatten(1)
+        max_feat = F.adaptive_max_pool2d(
+            region, 1
+        ).flatten(1)
+
+        base = self.local_pool_proj(
+            torch.cat([avg_feat, max_feat], dim=1)
         )
 
-        max_feat = (
-            F.adaptive_max_pool2d(
-                region,
-                output_size=1
-            ).flatten(1)
+        # Learned spatial weighting
+        scores = self.local_spatial_score(region)
+        scores = scores.flatten(1)
+        scores = torch.softmax(scores, dim=1)
+
+        feats = region.flatten(2)
+        spatial = torch.bmm(
+            feats,
+            scores.unsqueeze(2)
+        ).squeeze(2)
+
+        spatial = self.local_spatial_proj(
+            spatial
         )
 
-        pooled = torch.cat(
-            [
-                avg_feat,
-                max_feat
-            ],
-            dim=1
-        )
-
-        return self.local_pool_proj(
-            pooled
-        )
+        return base + spatial
 
     def forward(self, x):
-
         B, C, H, W = x.shape
 
         if H != 28 or W != 28:
             raise ValueError(
-                "FRITTransformer expects "
-                f"28x28 feature map, got {H}x{W}"
+                f"Expected 28x28 feature map, got {H}x{W}"
             )
 
-        # =================================================
-        # GLOBAL FEATURE
-        # =================================================
+        # Global branch
+        global_avg = F.adaptive_avg_pool2d(
+            x, 1
+        ).flatten(1)
 
-        global_feat = x.mean(
-            dim=[2, 3]
+        global_max = F.adaptive_max_pool2d(
+            x, 1
+        ).flatten(1)
+
+        global_feat = self.global_pool_proj(
+            torch.cat([global_avg, global_max], dim=1)
         )
 
-        aux_global_logits = (
-            self.aux_global_head(
-                global_feat
-            )
+        aux_global_logits = self.aux_global_head(
+            global_feat
         )
 
-        # =================================================
-        # FOUR ALIGNED REGIONS
-        #
-        #       TL | TR
-        #       ---+---
-        #       BL | BR
-        #
-        # Each region = 14x14.
-        # =================================================
+        # 4 aligned regions
+        tl = self.local_safm(x[:, :, :14, :14])
+        tr = self.local_safm(x[:, :, :14, 14:])
+        bl = self.local_safm(x[:, :, 14:, :14])
+        br = self.local_safm(x[:, :, 14:, 14:])
 
-        tl = x[
-            :,
-            :,
-            :14,
-            :14
-        ]
+        local_tokens = torch.stack([
+            self._local_token(tl),
+            self._local_token(tr),
+            self._local_token(bl),
+            self._local_token(br)
+        ], dim=1)
 
-        tr = x[
-            :,
-            :,
-            :14,
-            14:
-        ]
-
-        bl = x[
-            :,
-            :,
-            14:,
-            :14
-        ]
-
-        br = x[
-            :,
-            :,
-            14:,
-            14:
-        ]
-
-        # =================================================
-        # INDEPENDENT LOCAL SAFM
-        # =================================================
-
-        tl = self.local_safm_tl(
-            tl
-        )
-
-        tr = self.local_safm_tr(
-            tr
-        )
-
-        bl = self.local_safm_bl(
-            bl
-        )
-
-        br = self.local_safm_br(
-            br
-        )
-
-        # =================================================
-        # LOCAL TOKENS
-        # =================================================
-
-        local_tokens = torch.stack(
-            [
-                self._pool_local_region(tl),
-                self._pool_local_region(tr),
-                self._pool_local_region(bl),
-                self._pool_local_region(br)
-            ],
+        tokens = torch.cat(
+            [global_feat.unsqueeze(1), local_tokens],
             dim=1
         )
 
-        # =================================================
-        # RRT
-        #
-        # Learn relations among:
-        #   TL <-> TR
-        #   TL <-> BL
-        #   TL <-> BR
-        #   ...
-        # =================================================
+        tokens = tokens + self.pos_embed
 
-        local_tokens = (
-            local_tokens
-            + self.local_pos_embed
+        relation = self.local_transformer(tokens)
+
+        fused_global = relation[:, 0, :]
+        fused_local = relation[:, 1:, :]
+
+        aux_local_logits = self.aux_local_head(
+            fused_local.mean(dim=1)
         )
-
-        local_tokens = (
-            self.local_pos_drop(
-                local_tokens
-            )
-        )
-
-        local_relation = self.rrt(
-            local_tokens
-        )
-
-        # =================================================
-        # LOCAL AUXILIARY CLASSIFIER
-        # =================================================
-
-        local_feat = local_relation.mean(
-            dim=1
-        )
-
-        aux_local_logits = (
-            self.aux_local_head(
-                local_feat
-            )
-        )
-
-        # =================================================
-        # GLOBAL-LOCAL RELATION
-        #
-        # Global feature queries the RRT-refined local
-        # representation.
-        # =================================================
-
-        global_query = (
-            global_feat.unsqueeze(1)
-        )
-
-        cross_out, _ = self.glrt(
-            query=global_query,
-            key=local_relation,
-            value=local_relation
-        )
-
-        fused_global = (
-            self.glrt_norm1(
-                global_query
-                + cross_out
-            )
-        )
-
-        fused_global = (
-            self.glrt_norm2(
-                fused_global
-                + self.glrt_ffn(
-                    fused_global
-                )
-            )
-        )
-
-        fused_global = fused_global[
-            :,
-            0,
-            :
-        ]
 
         return (
             None,
