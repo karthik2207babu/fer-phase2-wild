@@ -98,35 +98,36 @@ class FRITTransformer(nn.Module):
 
         self.num_regions = 4
 
-        self.local_safm = SAFM(kernel_size=7)
+        self.local_safm = SAFM(
+            kernel_size=7
+        )
 
         self.local_pool_proj = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim),
-            nn.LayerNorm(embed_dim)
+            nn.Linear(
+                embed_dim * 2,
+                embed_dim
+            ),
+            nn.LayerNorm(
+                embed_dim
+            )
         )
-
-        # V16: learned spatial pooling residual
-        self.local_spatial_score = nn.Conv2d(
-            embed_dim, 1, kernel_size=3, padding=1
-        )
-
-        self.local_spatial_proj = nn.Linear(
-            embed_dim, embed_dim
-        )
-
-        # Start V16 branch with zero contribution.
-        nn.init.zeros_(self.local_spatial_score.weight)
-        nn.init.zeros_(self.local_spatial_score.bias)
-        nn.init.zeros_(self.local_spatial_proj.weight)
-        nn.init.zeros_(self.local_spatial_proj.bias)
 
         self.global_pool_proj = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim),
-            nn.LayerNorm(embed_dim)
+            nn.Linear(
+                embed_dim * 2,
+                embed_dim
+            ),
+            nn.LayerNorm(
+                embed_dim
+            )
         )
 
         self.pos_embed = nn.Parameter(
-            torch.randn(1, 5, embed_dim)
+            torch.randn(
+                1,
+                5,
+                embed_dim
+            )
         )
 
         self.local_transformer = nn.TransformerEncoder(
@@ -142,42 +143,37 @@ class FRITTransformer(nn.Module):
         )
 
         self.aux_global_head = nn.Linear(
-            embed_dim, num_classes
+            embed_dim,
+            num_classes
         )
 
         self.aux_local_head = nn.Linear(
-            embed_dim, num_classes
+            embed_dim,
+            num_classes
         )
 
-    def _local_token(self, region):
+    def _pool_local_region(self, region):
         avg_feat = F.adaptive_avg_pool2d(
-            region, 1
+            region,
+            1
         ).flatten(1)
 
         max_feat = F.adaptive_max_pool2d(
-            region, 1
+            region,
+            1
         ).flatten(1)
 
-        base = self.local_pool_proj(
-            torch.cat([avg_feat, max_feat], dim=1)
+        pooled = torch.cat(
+            [
+                avg_feat,
+                max_feat
+            ],
+            dim=1
         )
 
-        # Learned spatial weighting
-        scores = self.local_spatial_score(region)
-        scores = scores.flatten(1)
-        scores = torch.softmax(scores, dim=1)
-
-        feats = region.flatten(2)
-        spatial = torch.bmm(
-            feats,
-            scores.unsqueeze(2)
-        ).squeeze(2)
-
-        spatial = self.local_spatial_proj(
-            spatial
+        return self.local_pool_proj(
+            pooled
         )
-
-        return base + spatial
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -187,47 +183,80 @@ class FRITTransformer(nn.Module):
                 f"Expected 28x28 feature map, got {H}x{W}"
             )
 
-        # Global branch
         global_avg = F.adaptive_avg_pool2d(
-            x, 1
+            x,
+            1
         ).flatten(1)
 
         global_max = F.adaptive_max_pool2d(
-            x, 1
+            x,
+            1
         ).flatten(1)
 
         global_feat = self.global_pool_proj(
-            torch.cat([global_avg, global_max], dim=1)
+            torch.cat(
+                [
+                    global_avg,
+                    global_max
+                ],
+                dim=1
+            )
         )
 
         aux_global_logits = self.aux_global_head(
             global_feat
         )
 
-        # 4 aligned regions
-        tl = self.local_safm(x[:, :, :14, :14])
-        tr = self.local_safm(x[:, :, :14, 14:])
-        bl = self.local_safm(x[:, :, 14:, :14])
-        br = self.local_safm(x[:, :, 14:, 14:])
+        tl = self.local_safm(
+            x[:, :, :14, :14]
+        )
 
-        local_tokens = torch.stack([
-            self._local_token(tl),
-            self._local_token(tr),
-            self._local_token(bl),
-            self._local_token(br)
-        ], dim=1)
+        tr = self.local_safm(
+            x[:, :, :14, 14:]
+        )
 
-        tokens = torch.cat(
-            [global_feat.unsqueeze(1), local_tokens],
+        bl = self.local_safm(
+            x[:, :, 14:, :14]
+        )
+
+        br = self.local_safm(
+            x[:, :, 14:, 14:]
+        )
+
+        local_tokens = torch.stack(
+            [
+                self._pool_local_region(tl),
+                self._pool_local_region(tr),
+                self._pool_local_region(bl),
+                self._pool_local_region(br)
+            ],
             dim=1
         )
 
-        tokens = tokens + self.pos_embed
+        tokens = torch.cat(
+            [
+                global_feat.unsqueeze(1),
+                local_tokens
+            ],
+            dim=1
+        )
 
-        relation = self.local_transformer(tokens)
+        tokens = (
+            tokens
+            + self.pos_embed
+        )
 
-        fused_global = relation[:, 0, :]
-        fused_local = relation[:, 1:, :]
+        relation = self.local_transformer(
+            tokens
+        )
+
+        fused_global = relation[
+            :, 0, :
+        ]
+
+        fused_local = relation[
+            :, 1:, :
+        ]
 
         aux_local_logits = self.aux_local_head(
             fused_local.mean(dim=1)
