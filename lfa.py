@@ -81,57 +81,74 @@ class LFAModule(nn.Module):
     def __init__(self, in_channels=1792, out_channels=128):
         super().__init__()
 
-        hidden = max(32, in_channels // 16)
-
-        self.channel_attn = nn.Sequential(
-            nn.Linear(in_channels, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, in_channels)
-        )
-
         self.bridge = nn.Conv2d(
-            in_channels, out_channels, 1, bias=False
+            in_channels,
+            out_channels,
+            kernel_size=1,
+            bias=False
         )
-        self.bn_bridge = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.bn_bridge = nn.BatchNorm2d(
+            out_channels
+        )
+        self.relu = nn.ReLU(
+            inplace=True
+        )
 
         self.conv1x3 = nn.Conv2d(
-            out_channels, out_channels, (1, 3),
-            padding=(0, 1), bias=False
+            out_channels,
+            out_channels,
+            kernel_size=(1, 3),
+            padding=(0, 1),
+            bias=False
         )
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.bn1 = nn.BatchNorm2d(
+            out_channels
+        )
 
         self.conv3x3 = nn.Conv2d(
-            out_channels, out_channels, 3,
-            padding=1, bias=False
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            padding=1,
+            bias=False
         )
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.bn2 = nn.BatchNorm2d(
+            out_channels
+        )
 
         self.conv3x1 = nn.Conv2d(
-            out_channels, out_channels, (3, 1),
-            padding=(1, 0), bias=False
+            out_channels,
+            out_channels,
+            kernel_size=(3, 1),
+            padding=(1, 0),
+            bias=False
         )
-        self.bn3 = nn.BatchNorm2d(out_channels)
-
-        nn.init.zeros_(self.channel_attn[2].weight)
-        nn.init.zeros_(self.channel_attn[2].bias)
+        self.bn3 = nn.BatchNorm2d(
+            out_channels
+        )
 
     def _process_region(self, x):
-        x = self.relu(self.bn1(self.conv1x3(x)))
-        x = self.relu(self.bn2(self.conv3x3(x)))
-        x = self.relu(self.bn3(self.conv3x1(x)))
-        return x + x.detach() * 0
+        residual = x
+
+        x = self.relu(
+            self.bn1(
+                self.conv1x3(x)
+            )
+        )
+        x = self.relu(
+            self.bn2(
+                self.conv3x3(x)
+            )
+        )
+        x = self.relu(
+            self.bn3(
+                self.conv3x1(x)
+            )
+        )
+
+        return x + residual
 
     def forward(self, x):
-        b, c, _, _ = x.shape
-
-        pooled = F.adaptive_avg_pool2d(x, 1).view(b, c)
-        gate = 2.0 * torch.sigmoid(
-            self.channel_attn(pooled)
-        ).view(b, c, 1, 1)
-
-        x = x * gate
-
         x = self.relu(
             self.bn_bridge(
                 self.bridge(x)
@@ -155,7 +172,16 @@ class LFAModule(nn.Module):
         bl = self._process_region(bl)
         br = self._process_region(br)
 
-        top = torch.cat((tl, tr), dim=3)
-        bottom = torch.cat((bl, br), dim=3)
+        top = torch.cat(
+            (tl, tr),
+            dim=3
+        )
+        bottom = torch.cat(
+            (bl, br),
+            dim=3
+        )
 
-        return torch.cat((top, bottom), dim=2)
+        return torch.cat(
+            (top, bottom),
+            dim=2
+        )
