@@ -102,26 +102,58 @@ class FRITTransformer(nn.Module):
             kernel_size=7
         )
 
+        # Existing V12 fine local token
         self.local_pool_proj = nn.Sequential(
             nn.Linear(
                 embed_dim * 2,
                 embed_dim
             ),
-            nn.LayerNorm(
-                embed_dim
-            )
+            nn.LayerNorm(embed_dim)
         )
 
+        # V26 coarse local branch
+        self.local_context_conv = nn.Sequential(
+            nn.Conv2d(
+                embed_dim,
+                embed_dim,
+                kernel_size=3,
+                padding=1,
+                bias=False
+            ),
+            nn.BatchNorm2d(embed_dim),
+            nn.GELU()
+        )
+
+        self.local_context_proj = nn.Sequential(
+            nn.Linear(
+                embed_dim * 2,
+                embed_dim
+            ),
+            nn.LayerNorm(embed_dim)
+        )
+
+        # Start coarse branch at zero contribution
+        nn.init.zeros_(
+            self.local_context_proj[0].weight
+        )
+        nn.init.zeros_(
+            self.local_context_proj[0].bias
+        )
+
+        self.local_context_gate = nn.Parameter(
+            torch.tensor(1.0)
+        )
+
+        # V12 global branch
         self.global_pool_proj = nn.Sequential(
             nn.Linear(
                 embed_dim * 2,
                 embed_dim
             ),
-            nn.LayerNorm(
-                embed_dim
-            )
+            nn.LayerNorm(embed_dim)
         )
 
+        # 1 global + 4 local
         self.pos_embed = nn.Parameter(
             torch.randn(
                 1,
@@ -163,17 +195,54 @@ class FRITTransformer(nn.Module):
             1
         ).flatten(1)
 
-        pooled = torch.cat(
-            [
-                avg_feat,
-                max_feat
-            ],
-            dim=1
+        return self.local_pool_proj(
+            torch.cat(
+                [avg_feat, max_feat],
+                dim=1
+            )
         )
 
-        return self.local_pool_proj(
-            pooled
+    def _coarse_local_context(self, region):
+        context = self.local_context_conv(
+            region
         )
+
+        context = F.adaptive_avg_pool2d(
+            context,
+            (7, 7)
+        )
+
+        avg_feat = F.adaptive_avg_pool2d(
+            context,
+            1
+        ).flatten(1)
+
+        max_feat = F.adaptive_max_pool2d(
+            context,
+            1
+        ).flatten(1)
+
+        coarse = self.local_context_proj(
+            torch.cat(
+                [avg_feat, max_feat],
+                dim=1
+            )
+        )
+
+        return (
+            self.local_context_gate * coarse
+        )
+
+    def _make_local_token(self, region):
+        fine = self._pool_local_region(
+            region
+        )
+
+        coarse = self._coarse_local_context(
+            region
+        )
+
+        return fine + coarse
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -183,6 +252,7 @@ class FRITTransformer(nn.Module):
                 f"Expected 28x28 feature map, got {H}x{W}"
             )
 
+        # Global token
         global_avg = F.adaptive_avg_pool2d(
             x,
             1
@@ -195,18 +265,18 @@ class FRITTransformer(nn.Module):
 
         global_feat = self.global_pool_proj(
             torch.cat(
-                [
-                    global_avg,
-                    global_max
-                ],
+                [global_avg, global_max],
                 dim=1
             )
         )
 
-        aux_global_logits = self.aux_global_head(
-            global_feat
+        aux_global_logits = (
+            self.aux_global_head(
+                global_feat
+            )
         )
 
+        # Four aligned local regions
         tl = self.local_safm(
             x[:, :, :14, :14]
         )
@@ -225,10 +295,10 @@ class FRITTransformer(nn.Module):
 
         local_tokens = torch.stack(
             [
-                self._pool_local_region(tl),
-                self._pool_local_region(tr),
-                self._pool_local_region(bl),
-                self._pool_local_region(br)
+                self._make_local_token(tl),
+                self._make_local_token(tr),
+                self._make_local_token(bl),
+                self._make_local_token(br)
             ],
             dim=1
         )
@@ -242,8 +312,8 @@ class FRITTransformer(nn.Module):
         )
 
         tokens = (
-            tokens
-            + self.pos_embed
+            tokens +
+            self.pos_embed
         )
 
         relation = self.local_transformer(
@@ -258,8 +328,10 @@ class FRITTransformer(nn.Module):
             :, 1:, :
         ]
 
-        aux_local_logits = self.aux_local_head(
-            fused_local.mean(dim=1)
+        aux_local_logits = (
+            self.aux_local_head(
+                fused_local.mean(dim=1)
+            )
         )
 
         return (
